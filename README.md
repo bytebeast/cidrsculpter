@@ -1,9 +1,14 @@
 # CIDRSculpter
 
-![Version](https://img.shields.io/badge/version-1.0.0-89b4fa?style=flat-square)
-![Status](https://img.shields.io/badge/status-beta-f9e2af?style=flat-square)
-![Python](https://img.shields.io/badge/python-3.10+-cba6f7?style=flat-square)
-![License](https://img.shields.io/badge/license-MIT-a6e3a1?style=flat-square)
+<p align="center">
+  <img alt="Version" src="https://img.shields.io/badge/Version-1.0.0-89b4fa?style=flat">
+  <img alt="Status" src="https://img.shields.io/badge/Status-beta-f9e2af?style=flat">
+  <a href="https://github.com/bytebeast/check-endpoint/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-a6e3a1?style=flat"></a>
+  <a href="https://www.python.org/downloads/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10+-cba6f7?style=flat"></a>
+  <a href="https://github.com/bytebeast/check-endpoint/actions/workflows/github-code-scanning/codeql"><img src="https://github.com/bytebeast/check-endpoint/actions/workflows/github-code-scanning/codeql/badge.svg" alt="CodeQL"></a>
+  <a href="https://github.com/bytebeast/check-endpoint/"><img src="https://img.shields.io/github/stars/bytebeast/check-endpoint?style=flat&label=Stars" alt="GitHub Stars"></a>
+</p>
+
 
 > An interactive terminal UI for planning and sculpting IP address spaces —
 > split, join, tag, visualise, and export to AWS, Azure, GCP, Terraform,
