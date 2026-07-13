@@ -6,7 +6,7 @@
   <a href="https://github.com/bytebeast/cidrsculpter/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-a6e3a1?style=flat"></a>
   <a href="https://www.python.org/downloads/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10+-cba6f7?style=flat"></a>
   <a href="https://github.com/bytebeast/cidrsculpter/actions/workflows/github-code-scanning/codeql"><img src="https://github.com/bytebeast/cidrsculpter/actions/workflows/github-code-scanning/codeql/badge.svg" alt="CodeQL"></a>
-  <a href="https://github.com/bytebeast/check-endpoint/"><img src="https://img.shields.io/github/stars/bytebeast/cidrsculpter?style=flat&label=Stars" alt="GitHub Stars"></a>
+  <a href="https://github.com/bytebeast/cidrsculpter"><img src="https://img.shields.io/github/stars/bytebeast/cidrsculpter?style=flat&label=Stars" alt="GitHub Stars"></a>
 </p>
 
 
