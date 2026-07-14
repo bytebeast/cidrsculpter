@@ -71,9 +71,9 @@ CONTAINER_SHADE_CYCLE = [
 ]
 
 
-# =========================================================
-# MODEL
-# =========================================================
+##=========================================================
+## MODEL
+##=========================================================
 
 
 @dataclass
@@ -177,7 +177,9 @@ class CIDRModel:
             key=lambda c: ipaddress.ip_network(c),
         )
 
-    # -- Serialisation ----------------------------------------
+    ##=========================================================
+    ## Serialisation
+    ##=========================================================
 
     def to_dict(self, plan_name: str) -> dict:
         """Serialise the full model to a JSON-safe dict for save files."""
@@ -210,7 +212,9 @@ class CIDRModel:
             )
         return model
 
-    # -- Tags --------------------------------------------------
+    ##=========================================================
+    ## Tags
+    ##=========================================================
     def set_tags(self, cidr: str, tags: dict[str, str]):
         if cidr in self.nodes:
             self.nodes[cidr].tags = dict(tags)
@@ -247,9 +251,9 @@ class CIDRModel:
         return name, others
 
 
-# =========================================================
-# TERRAFORM / HCL HELPERS
-# =========================================================
+##=========================================================
+## TERRAFORM / HCL HELPERS
+##=========================================================
 
 
 def tf_identifier(raw: str, fallback: str) -> str:
@@ -344,9 +348,9 @@ def filename_safe(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9_\-]", "", s) or "plan"
 
 
-# =========================================================
-# SCREENS
-# =========================================================
+##=========================================================
+## SCREENS
+##=========================================================
 
 
 class PlanNameInput(Screen):
@@ -474,9 +478,9 @@ class TableScreen(Screen):
         self.app.pop_screen()
 
 
-# =========================================================
-# LOAD SCREEN
-# =========================================================
+##=========================================================
+## LOAD SCREEN
+##=========================================================
 
 
 class LoadScreen(Screen):
@@ -524,9 +528,9 @@ class LoadScreen(Screen):
         self.app.pop_screen()
 
 
-# =========================================================
-# MAIN APP
-# =========================================================
+##=========================================================
+## MAIN APP
+##=========================================================
 
 
 class CIDRSculpterApp(App):
@@ -575,7 +579,9 @@ class CIDRSculpterApp(App):
         self.model: CIDRModel | None = None
         self.plan_name: str = "plan"
 
-    # -- compose / lifecycle ----------------------------------
+    ##=========================================================
+    ## compose / lifecycle
+    ##=========================================================
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -599,7 +605,9 @@ class CIDRSculpterApp(App):
     def export_path(self, suffix: str) -> str:
         return f"{filename_safe(self.plan_name)}_{suffix}"
 
-    # -- tree -------------------------------------------------
+    ##=========================================================
+    ## tree
+    ##=========================================================
 
     def _tree_label(self, cidr: str) -> Text:
         if self.model.is_leaf(cidr):
@@ -668,7 +676,9 @@ class CIDRSculpterApp(App):
         lines.append(f"[b]Tags:[/b]\n{tags_block}")
         self.details_panel.update("\n".join(lines))
 
-    # -- selection / navigation -------------------------------
+    ##=========================================================
+    ## selection / navigation
+    ##=========================================================
 
     def on_tree_node_selected(self, event: Tree.NodeSelected):
         self.update_details(getattr(event.node, "data", None))
@@ -676,7 +686,9 @@ class CIDRSculpterApp(App):
     def on_tree_node_highlighted(self, event: Tree.NodeHighlighted):
         self.update_details(getattr(event.node, "data", None))
 
-    # -- split / join -----------------------------------------
+    ##=========================================================
+    ## split / join
+    ##=========================================================
 
     def action_split(self):
         if not self.model:
@@ -700,7 +712,9 @@ class CIDRSculpterApp(App):
         else:
             self.bell()
 
-    # -- tagging ----------------------------------------------
+    ##=========================================================
+    ## tagging
+    ##=========================================================
 
     def action_add_tag(self):
         if not self.model:
@@ -710,14 +724,18 @@ class CIDRSculpterApp(App):
             return
         self.push_screen(TagInput(node.data))
 
-    # -- table ------------------------------------------------
+    ##=========================================================
+    ## table
+    ##=========================================================
 
     def action_table(self):
         if not self.model:
             return
         self.push_screen(TableScreen())
 
-    # -- save / load ------------------------------------------
+    ##=========================================================
+    ## save / load
+    ##=========================================================
 
     def action_save(self):
         if not self.model:
@@ -744,7 +762,9 @@ class CIDRSculpterApp(App):
             f"[green]Loaded: {self.plan_name}  ({self.model.root})[/green]"
         )
 
-    # -- shared export helpers --------------------------------
+    ##=========================================================
+    ## shared export helpers
+    ##=========================================================
 
     def _export_base(self) -> list[dict]:
         return [
@@ -773,7 +793,9 @@ class CIDRSculpterApp(App):
             return namer.claim(tf_identifier(name_tag, fallback)), True
         return namer.claim(fallback), False
 
-    # -- 1: JSON export ---------------------------------------
+    ##=========================================================
+    ## 1: JSON export
+    ##=========================================================
 
     def action_export_json(self):
         if not self.model:
@@ -790,7 +812,9 @@ class CIDRSculpterApp(App):
             )
         self.details_panel.update("[green]Exported JSON[/green]")
 
-    # -- 2: Terraform / AWS -----------------------------------
+    ##=========================================================
+    ## 2: Terraform / AWS
+    ##=========================================================
 
     def action_export_terraform(self):
         if not self.model:
@@ -856,7 +880,9 @@ class CIDRSculpterApp(App):
             f.write("\n".join(lines))
         self.details_panel.update("[green]Exported Terraform (AWS)[/green]")
 
-    # -- 3: AWS JSON plan -------------------------------------
+    ##=========================================================
+    ## 3: AWS JSON plan
+    ##=========================================================
 
     def action_export_aws(self):
         if not self.model:
@@ -878,15 +904,17 @@ class CIDRSculpterApp(App):
             )
         self.details_panel.update("[green]Exported AWS Plan[/green]")
 
-    # -- 4: CSV -----------------------------------------------
+    ##=========================================================
+    ## 4: CSV
+    ##=========================================================
 
     def action_export_csv(self):
         if not self.model:
             return
         with open(self.export_path("cidr.csv"), "w", newline="") as f:
             w = csv.writer(f)
-            # # comment lines carry metadata, most CSV parsers skip lines
-            # starting with # or you can strip them: grep -v '^#'
+            ## # comment lines carry metadata, most CSV parsers skip lines
+            ## starting with # or you can strip them: grep -v '^#'
             w.writerow([f"# plan_name: {self.plan_name}"])
             w.writerow([f"# root_cidr: {self.model.root}"])
             w.writerow(
@@ -919,7 +947,9 @@ class CIDRSculpterApp(App):
                 )
         self.details_panel.update("[green]Exported CSV[/green]")
 
-    # -- 5: Graphviz ------------------------------------------
+    ##=========================================================
+    ## 5: Graphviz
+    ##=========================================================
 
     @staticmethod
     def _dot_text(s: str) -> str:
@@ -1005,7 +1035,7 @@ class CIDRSculpterApp(App):
             f'fillcolor="{shade}"; margin=20; fontname="monospace";'
         )
         lines.append(
-            f"  {self._anchor_id(cidr, False)} [shape=point, style=invis, width=0.01, label=\"\"];"
+            f'  {self._anchor_id(cidr, False)} [shape=point, style=invis, width=0.01, label=""];'
         )
         for child in node.children:
             for line in self._render_node(child, depth + 1):
@@ -1056,14 +1086,16 @@ class CIDRSculpterApp(App):
             f.write("\n".join(lines))
         self.details_panel.update("[green]Exported Graphviz[/green]")
 
-    # -- 6: Plain text space-delimited ------------------------
-    #
-    # Headers use underscores so the entire output is parseable with
-    # awk, cut, or any whitespace-splitting tool:
-    #
-    #   awk 'NR>3 {print $1, $7}' plan_subnets.txt   # CIDR + LEAF columns
-    #
-    # The first two lines are # comments carrying root_cidr and plan_name.
+    ##=========================================================
+    ## 6: Plain text space-delimited
+    ##=========================================================
+    ##
+    ## Headers use underscores so the entire output is parseable with
+    ## awk, cut, or any whitespace-splitting tool:
+    ##
+    ##   awk 'NR>3 {print $1, $7}' plan_subnets.txt   # CIDR + LEAF columns
+    ##
+    ## The first two lines are # comments carrying root_cidr and plan_name.
 
     def action_export_text(self):
         if not self.model:
@@ -1099,7 +1131,7 @@ class CIDRSculpterApp(App):
                 ]
             )
 
-        # Column widths from content
+        ## Column widths from content
         widths = [
             max(len(headers[i]), *(len(r[i]) for r in rows))
             for i in range(len(headers))
@@ -1118,10 +1150,12 @@ class CIDRSculpterApp(App):
             f.write("\n".join(lines) + "\n")
         self.details_panel.update("[green]Exported plain text[/green]")
 
-    # -- 7: Markdown ------------------------------------------
-    #
-    # Ready to paste directly into GitHub, GitLab, Notion, etc.
-    # Only leaf CIDRs are in the table (containers are not deployable).
+    ##=========================================================
+    ## 7: Markdown
+    ##=========================================================
+    ##
+    ## Ready to paste directly into GitHub, GitLab, Notion, etc.
+    ## Only leaf CIDRs are in the table (containers are not deployable).
 
     def action_export_markdown(self):
         if not self.model:
@@ -1172,12 +1206,14 @@ class CIDRSculpterApp(App):
             f.write("\n".join(lines) + "\n")
         self.details_panel.update("[green]Exported Markdown[/green]")
 
-    # -- 8: ADF (Atlassian Document Format) -------------------
-    #
-    # Paste the content of the .adf.json file into Confluence via the
-    # /wiki/rest/api/content endpoint, or use it with the Jira rich-
-    # text editor API. The document includes a heading, the root CIDR
-    # as inline code, and a table of all CIDR blocks.
+    ##=========================================================
+    ## 8: ADF (Atlassian Document Format)
+    ##=========================================================
+    ##
+    ## Paste the content of the .adf.json file into Confluence via the
+    ## /wiki/rest/api/content endpoint, or use it with the Jira rich-
+    ## text editor API. The document includes a heading, the root CIDR
+    ## as inline code, and a table of all CIDR blocks.
 
     def action_export_adf(self):
         if not self.model:
@@ -1276,18 +1312,20 @@ class CIDRSculpterApp(App):
             json.dump(doc, f, indent=2)
         self.details_panel.update("[green]Exported ADF (Confluence/Jira)[/green]")
 
-    # -- c: Confluence wiki markup ---------------------------
-    #
-    # Classic Confluence storage format / wiki markup table.
-    # Paste directly into the Confluence editor in "wiki markup" mode
-    # (Edit page → Insert → Markup → Confluence Wiki).
-    # Also compatible with the older Confluence wiki editor.
-    #
-    # Format:
-    #   h1. Title
-    #   *Root CIDR:* +10.0.0.0/20+
-    #   ||Header1||Header2||...||
-    #   |cell|cell|...|
+    ##=========================================================
+    ## c: Confluence wiki markup
+    ##=========================================================
+    ##
+    ## Classic Confluence storage format / wiki markup table.
+    ## Paste directly into the Confluence editor in "wiki markup" mode
+    ## (Edit page → Insert → Markup → Confluence Wiki).
+    ## Also compatible with the older Confluence wiki editor.
+    ##
+    ## Format:
+    ##   h1. Title
+    ##   *Root CIDR:* +10.0.0.0/20+
+    ##   ||Header1||Header2||...||
+    ##   |cell|cell|...|
 
     def action_export_confluence(self):
         if not self.model:
@@ -1329,13 +1367,12 @@ class CIDRSculpterApp(App):
             f.write("\n".join(lines) + "\n")
         self.details_panel.update("[green]Exported Confluence wiki markup[/green]")
 
-    #
-    # azurerm_virtual_network  →  VPC equivalent
-    # azurerm_subnet           →  subnet equivalent
-    #
-    # Note: azurerm_subnet does not support a 'tags' block, tags in
-    # Azure are set at the Virtual Network and Resource Group level.
-    # Subnet-level tags are emitted as comments for reference.
+    ## azurerm_virtual_network  →  VPC equivalent
+    ## azurerm_subnet           →  subnet equivalent
+    ##
+    ## Note: azurerm_subnet does not support a 'tags' block, tags in
+    ## Azure are set at the Virtual Network and Resource Group level.
+    ## Subnet-level tags are emitted as comments for reference.
 
     def action_export_azure(self):
         if not self.model:
@@ -1398,13 +1435,15 @@ class CIDRSculpterApp(App):
             f.write("\n".join(lines) + "\n")
         self.details_panel.update("[green]Exported Azure Terraform[/green]")
 
-    # -- 0: GCP Terraform -------------------------------------
-    #
-    # google_compute_network     →  VPC equivalent
-    # google_compute_subnetwork  →  subnet equivalent (regional resource)
-    #
-    # GCP uses 'labels' instead of 'tags'. Label keys/values must be
-    # lowercase letters, digits, hyphens, or underscores (max 63 chars).
+    ##=========================================================
+    ## 0: GCP Terraform
+    ##=========================================================
+    ##
+    ## google_compute_network     →  VPC equivalent
+    ## google_compute_subnetwork  →  subnet equivalent (regional resource)
+    ##
+    ## GCP uses 'labels' instead of 'tags'. Label keys/values must be
+    ## lowercase letters, digits, hyphens, or underscores (max 63 chars).
 
     def action_export_gcp(self):
         if not self.model:
@@ -1468,9 +1507,9 @@ class CIDRSculpterApp(App):
         self.details_panel.update("[green]Exported GCP Terraform[/green]")
 
 
-# =========================================================
-# ENTRY POINT
-# =========================================================
+##=========================================================
+## ENTRY POINT
+##=========================================================
 
 
 def main():
