@@ -142,7 +142,7 @@ comment.
 Press `a` on any CIDR to add tags as `key=value` pairs (comma-separated):
 
 ```
-name=bastion,private=false,tier=datastore
+name=bastion001,private=false,tier=bastions
 ```
 
 The `name` tag is special: used as the Terraform resource identifier, shown
