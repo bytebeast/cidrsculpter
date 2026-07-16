@@ -111,7 +111,7 @@ Output filenames are derived from your plan name:
 Examples: `prod/vpc 1.0` → `prod-vpc_1-0`, `2001:db8::/32` → `2001-db8-32`
 
 _Notes: Create cidr diagram using dot file._
-```
+```bash
 dot -Tpng <name>_cidr.dot -o <name>_cidr.png
 ```
 
