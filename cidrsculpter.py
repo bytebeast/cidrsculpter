@@ -6,23 +6,26 @@
 #   pip install rich textual
 #
 # Key bindings (inside the app):
-#   s   split selected block into two halves
-#   j   join selected block's two children back into one
-#   t   view full table of all CIDRs
-#   a   add / edit tags on selected CIDR
-#   q   quit
+#   s        split selected block into two halves
+#   j        join selected block's two children back into one
+#   t        view full table of all CIDRs
+#   a        add / edit tags on selected CIDR
+#   ctrl+s   save plan to <Plan_Name>_plan.json in the working directory
+#   ctrl+o   load an existing plan from a saved .json file
+#   q        quit
 #
-# Exports (number keys):
-#   1   JSON          (includes root CIDR + plan name)
-#   2   Terraform     (AWS VPC + subnets)
-#   3   AWS JSON plan (vpc + subnets)
-#   4   CSV           (# metadata header with root CIDR)
-#   5   Graphviz DOT  (nested cluster diagram)
-#   6   Plain text    (space-delimited, underscore headers, parseable with awk/cut)
-#   7   Markdown      (table + root CIDR heading, ready to paste into docs)
-#   8   ADF           (Atlassian Document Format: paste into Confluence / Jira)
-#   9   Azure TF      (azurerm_virtual_network + azurerm_subnet)
-#   0   GCP TF        (google_compute_network + google_compute_subnetwork)
+# Exports:
+#   1   JSON             (includes root CIDR + plan name)
+#   2   Terraform        (AWS VPC + subnets)
+#   3   AWS JSON plan    (vpc + subnets)
+#   4   CSV              (# metadata header with root CIDR)
+#   5   Graphviz DOT     (nested cluster diagram)
+#   6   Plain text       (space-delimited, underscore headers, parseable with awk/cut)
+#   7   Markdown         (table + root CIDR heading, ready to paste into docs)
+#   8   ADF              (Atlassian Document Format: paste into Confluence / Jira)
+#   9   Azure TF         (azurerm_virtual_network + azurerm_subnet)
+#   0   GCP TF           (google_compute_network + google_compute_subnetwork)
+#   c   Confluence wiki  (classic wiki-markup table)
 
 from __future__ import annotations
 
@@ -30,7 +33,6 @@ import csv
 import html
 import ipaddress
 import json
-import math
 import re
 import uuid
 from dataclasses import dataclass, field
@@ -281,26 +283,41 @@ def hcl_tags_block(tags: dict[str, str], indent: str = "  ") -> list[str]:
     return lines
 
 
-def hcl_labels_block(tags: dict[str, str], indent: str = "  ") -> list[str]:
-    """GCP uses 'labels' instead of 'tags'. Keys/values must be lowercase."""
+def _gcp_name(s: str, fallback: str = "network") -> str:
+    """Sanitize a string into a valid GCP compute resource name.
+
+    GCP compute network/subnetwork names must match RFC1035:
+    [a-z]([-a-z0-9]*[a-z0-9])?  which means a leading lowercase letter,
+    then lowercase letters, digits, or hyphens, not ending in a hyphen,
+    1 to 63 characters. tf_identifier() produces underscores (fine for a
+    Terraform resource label) which are not valid in a GCP name, so this
+    is applied to the 'name' argument value specifically.
+    """
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9-]+", "-", s)
+    s = re.sub(r"-{2,}", "-", s).strip("-")
+    if not s or not s[0].isalpha():
+        s = "n-" + s
+    s = s[:63].strip("-")
+    return s or fallback
+
+
+def _tag_comment_block(tags: dict[str, str], indent: str = "  ") -> list[str]:
+    """Render tags as reference-only comments.
+
+    Used for resources that have no labels/tags argument (GCP compute
+    networks and subnetworks), so the tags stay visible without emitting
+    an unsupported block that would fail 'terraform validate'.
+    """
     if not tags:
         return []
-    clean = {_gcp_label(k): _gcp_label(v) for k, v in tags.items()}
-    width = max(len(k) for k in clean)
-    lines = [f"{indent}labels = {{"]
-    for k, v in clean.items():
-        lines.append(f'{indent}  {k.ljust(width)} = "{hcl_escape(v)}"')
-    lines.append(f"{indent}}}")
+    lines = [
+        f"{indent}# Labels/tags are not supported on this resource; "
+        f"values shown for reference:"
+    ]
+    for k, v in tags.items():
+        lines.append(f'{indent}# {k} = "{hcl_escape(v)}"')
     return lines
-
-
-def _gcp_label(s: str) -> str:
-    """Sanitize a string to a valid GCP label key/value (lowercase, [a-z0-9_-])."""
-    s = s.lower().strip()
-    s = re.sub(r"[^a-z0-9_-]", "_", s)
-    if s and not s[0].isalpha():
-        s = "x_" + s
-    return s[:63] or "unknown"
 
 
 class UniqueNamer:
@@ -328,12 +345,14 @@ def _is_ipv6(cidr: str) -> bool:
 
 def _fmt_hosts(n: int) -> str:
     """Format host count compactly. IPv6 counts are powers of 2 so we
-    express them as 2^N rather than a 39-digit integer."""
+    express them as 2^N rather than a 39-digit integer. The power-of-two
+    test is done with exact integer arithmetic (n & (n - 1)) so values
+    that are merely close to a power of two, such as an IPv4 /0 host count
+    of 2^32 - 2, are not mislabeled as 2^N."""
     if n <= 10_000_000:
         return str(n)
-    log2 = math.log2(n)
-    if abs(log2 - round(log2)) < 1e-9:
-        return f"2^{int(round(log2))}"
+    if n > 0 and (n & (n - 1)) == 0:  # exact power of two
+        return f"2^{n.bit_length() - 1}"
     if n >= 10**18:
         return f"{n:.2e}"
     return str(n)
@@ -1170,12 +1189,12 @@ class CIDRSculpterApp(App):
             rows.append(
                 [
                     f"`{i['cidr']}`",
-                    name or "—",
+                    name or "-",
                     i["start"],
                     i["end"],
                     _fmt_hosts(i["hosts"]),
                     "✓" if self.model.is_leaf(cidr) else "",
-                    CIDRModel.tags_to_string(others) or "—",
+                    CIDRModel.tags_to_string(others) or "-",
                 ]
             )
 
@@ -1269,12 +1288,12 @@ class CIDRSculpterApp(App):
             name, others = CIDRModel.split_name_tag(i["tags"])
             cells = [
                 i["cidr"],
-                name or "—",
+                name or "-",
                 i["start"],
                 i["end"],
                 _fmt_hosts(i["hosts"]),
                 "yes" if self.model.is_leaf(cidr) else "no",
-                CIDRModel.tags_to_string(others) or "—",
+                CIDRModel.tags_to_string(others) or "-",
             ]
             data_rows.append(
                 {
@@ -1352,13 +1371,13 @@ class CIDRSculpterApp(App):
             lines.append(
                 wiki_row(
                     [
-                        f"{{{{monospace}}}}{i['cidr']}{{{{/monospace}}}}",
-                        name or "\u2014",
+                        "{{" + i["cidr"] + "}}",
+                        name or "-",
                         i["start"],
                         i["end"],
                         _fmt_hosts(i["hosts"]),
                         "(/)" if self.model.is_leaf(cidr) else "(x)",
-                        CIDRModel.tags_to_string(others) or "\u2014",
+                        CIDRModel.tags_to_string(others) or "-",
                     ]
                 )
             )
@@ -1442,8 +1461,11 @@ class CIDRSculpterApp(App):
     ## google_compute_network     →  VPC equivalent
     ## google_compute_subnetwork  →  subnet equivalent (regional resource)
     ##
-    ## GCP uses 'labels' instead of 'tags'. Label keys/values must be
-    ## lowercase letters, digits, hyphens, or underscores (max 63 chars).
+    ## Note: neither google_compute_network nor google_compute_subnetwork
+    ## supports a 'labels' or 'tags' block, so tags are emitted as reference
+    ## comments. Resource 'name' values must be RFC1035 (lowercase letters,
+    ## digits, hyphens; no underscores; max 63 chars) and are sanitized
+    ## separately from the Terraform resource labels.
 
     def action_export_gcp(self):
         if not self.model:
@@ -1469,12 +1491,11 @@ class CIDRSculpterApp(App):
             "}",
             "",
             f'resource "google_compute_network" "{network_res}" {{',
-            f'  name                    = "{network_res}"',
+            f'  name                    = "{_gcp_name(network_res)}"',
             "  project                 = var.project_id",
             "  auto_create_subnetworks = false",
         ]
-        root_labels = self._tf_tags_for(self.model.root)
-        lines += hcl_labels_block(root_labels)
+        lines += _tag_comment_block(self._tf_tags_for(self.model.root))
         lines.append("}")
 
         for c in self.model.leaf_cidrs():
@@ -1492,14 +1513,13 @@ class CIDRSculpterApp(App):
             lines += [
                 "",
                 f'resource "google_compute_subnetwork" "{res_name}" {{',
-                f'  name          = "{res_name}"',
+                f'  name          = "{_gcp_name(res_name)}"',
                 "  project       = var.project_id",
                 "  region        = var.region",
                 f'  ip_cidr_range = "{c}"',
                 f"  network       = google_compute_network.{network_res}.id",
             ] + v6_note
-            sub_labels = self._tf_tags_for(c)
-            lines += hcl_labels_block(sub_labels)
+            lines += _tag_comment_block(self._tf_tags_for(c))
             lines.append("}")
 
         with open(self.export_path("gcp.tf"), "w") as f:
