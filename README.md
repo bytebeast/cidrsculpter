@@ -7,7 +7,6 @@
   <a href="https://www.python.org/downloads/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10+-cba6f7?style=flat"></a>
 </p>
 
-
 > An interactive terminal UI for planning and sculpting IP address spaces —
 > split, join, tag, visualise, and export to AWS, Azure, GCP, Terraform,
 > Confluence, and more. Supports both IPv4 and IPv6.
@@ -26,9 +25,9 @@ No CIDR math in your head. No spreadsheets. No leaving the terminal.
 
 ---
 
-## Screenshot
+## Screenshot (example)
 
-<!-- Add screenshot here -->
+<img alt="Status" src="images/cidrsculpter-ss.png">
 
 ---
 
@@ -111,6 +110,7 @@ Output filenames are derived from your plan name:
 Examples: `prod/vpc 1.0` → `prod-vpc_1-0`, `2001:db8::/32` → `2001-db8-32`
 
 _Notes: Create cidr diagram using dot file._
+
 ```bash
 dot -Tpng <name>_cidr.dot -o <name>_cidr.png
 ```
