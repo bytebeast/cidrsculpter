@@ -5,19 +5,9 @@
 
 [project]
 name = "cidrsculpter"
-version = "1.0.0"
+version = "1.1.0"
 
 # THE single source of truth for the minimum Python version.
-#
-# There is deliberately no [tool.ruff] target-version below. Ruff falls back
-# to this value when target-version is unset, taking the LOWER bound of the
-# range, so one line keeps ruff, pip and the README in agreement and the two
-# settings can never contradict each other.
-#
-# Raising this to 3.11 or higher switches on rule UP017 ("Use `datetime.UTC`
-# alias"), which rewrites the compatibility shim in check-endpoint.py into
-# `UTC = UTC` and deletes the `from datetime import timezone` behind it. That
-# is a NameError on 3.9 and 3.10, which is the failure the shim prevents.
 requires-python = ">=3.9"
 
 [tool.ruff]

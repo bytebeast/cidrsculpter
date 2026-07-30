@@ -44,16 +44,12 @@ from pathlib import Path
 # must have exactly one capture group around the version itself.
 VERSION_FILES = [
     (
-        "check-endpoint.py",
+        "cidrsculpter.py",
         re.compile(r'(?m)^(APP_VERSION\s*=\s*")([0-9]+\.[0-9]+\.[0-9]+)(")'),
     ),
     (
         "pyproject.toml",
         re.compile(r'(?m)^(version\s*=\s*")([0-9]+\.[0-9]+\.[0-9]+)(")'),
-    ),
-    (
-        "contrib/check-endpoint-exporter/check-endpoint.py",
-        re.compile(r'(?m)^(APP_VERSION\s*=\s*")([0-9]+\.[0-9]+\.[0-9]+)(")'),
     ),
 ]
 
