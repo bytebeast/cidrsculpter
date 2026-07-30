@@ -47,9 +47,9 @@ jobs:
       # silently for the third.
       - name: Tag if the committed version has none
         run: |
-          version=$(sed -n 's/^APP_VERSION *= *"\(.*\)"/\1/p' check-endpoint.py)
+          version=$(sed -n 's/^APP_VERSION *= *"\(.*\)"/\1/p' cidrsculpter.py)
           if [ -z "$version" ]; then
-            echo "::error::could not read APP_VERSION from check-endpoint.py"
+            echo "::error::could not read APP_VERSION from cidrsculpter.py"
             exit 1
           fi
           tag="v$version"
