@@ -43,6 +43,8 @@ from textual.containers import Vertical
 from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Input, Static, Tree
 
+APP_VERSION = "1.0.0"
+
 # =========================================================
 # CATPPUCCIN THEME
 # =========================================================
