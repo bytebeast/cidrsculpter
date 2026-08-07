@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.0.1 (2026-08-07)
+
+### Bug Fixes
+
+- **cidrsculpter.py **: add author dunder (AH-2026080566777)
+- **release**: cp'd check-endpoint, tried, i... (AH-2026080620360)
+
+### Refactoring
+
+- **release.py **: mv release.py from root to... (AH-2026080693279)
+
+<!-- also in this release: ci -->
+
 ## v1.1.0 (2026-07-30)
 
 ### Features
