@@ -4,7 +4,7 @@
 # https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 version: 2
 updates:
-  # check-endpoint.py's own runtime dependency (requirements.txt at repo root)
+  # cidrsculpter.py's own runtime dependency (requirements.txt at repo root)
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
