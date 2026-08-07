@@ -60,6 +60,32 @@ jobs:
     permissions:
       contents: read # the App token does the writing
     steps:
+      # vars.* resolve to "" when undefined rather than failing, so a missing
+      # App ID surfaces as an opaque Octokit error ("appId option is required")
+      # instead of a workflow error. Check it here where the message is useful.
+      - name: Check App credentials are present
+        env:
+          APP_ID: ${{ vars.RELEASE_APP_ID }}
+          PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          # App IDs are not secret, so printing this is safe and saves a round trip.
+          echo "app id seen by the workflow: '${APP_ID}'"
+          echo "private key length: ${#PRIVATE_KEY}"
+
+          if [ -z "$APP_ID" ]; then
+            echo "::error::vars.RELEASE_APP_ID is empty. Check Settings → Secrets and variables → Actions → Variables (not the Secrets tab), and that any org-level variable grants access to this repo."
+            exit 1
+          fi
+          if [ -z "$PRIVATE_KEY" ]; then
+            echo "::error::secrets.RELEASE_APP_PRIVATE_KEY is empty."
+            exit 1
+          fi
+          # A valid PEM is ~1700-3300 chars; anything shorter was truncated on paste.
+          if [ "${#PRIVATE_KEY}" -lt 1000 ]; then
+            echo "::error::RELEASE_APP_PRIVATE_KEY looks truncated (${#PRIVATE_KEY} chars). Paste the whole .pem, including the BEGIN/END lines."
+            exit 1
+          fi
+
       - uses: actions/create-github-app-token@v2
         id: app-token
         with:
@@ -107,6 +133,28 @@ jobs:
     permissions:
       contents: read # the App token does the writing
     steps:
+      # Same guard as the tag job — see the comment there.
+      - name: Check App credentials are present
+        env:
+          APP_ID: ${{ vars.RELEASE_APP_ID }}
+          PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          echo "app id seen by the workflow: '${APP_ID}'"
+          echo "private key length: ${#PRIVATE_KEY}"
+
+          if [ -z "$APP_ID" ]; then
+            echo "::error::vars.RELEASE_APP_ID is empty. Check Settings → Secrets and variables → Actions → Variables (not the Secrets tab), and that any org-level variable grants access to this repo."
+            exit 1
+          fi
+          if [ -z "$PRIVATE_KEY" ]; then
+            echo "::error::secrets.RELEASE_APP_PRIVATE_KEY is empty."
+            exit 1
+          fi
+          if [ "${#PRIVATE_KEY}" -lt 1000 ]; then
+            echo "::error::RELEASE_APP_PRIVATE_KEY looks truncated (${#PRIVATE_KEY} chars). Paste the whole .pem, including the BEGIN/END lines."
+            exit 1
+          fi
+
       - uses: actions/create-github-app-token@v2
         id: app-token
         with:
