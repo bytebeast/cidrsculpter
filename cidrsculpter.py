@@ -44,7 +44,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Input, Static, Tree
 
 __author__ = "github.com/bytebeast"
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.1.0"
 
 # =========================================================
 # CATPPUCCIN THEME
@@ -159,6 +159,14 @@ class CIDRModel:
             "start": start,
             "end": end,
             "hosts": host_count,
+            # Per-cloud usable addresses (IPv4 only): each cloud reserves some
+            # addresses in every subnet (AWS/Azure 5, GCP 4), so the generic
+            # count above overstates what you can actually assign.
+            "usable": (
+                None
+                if isinstance(net, ipaddress.IPv6Network)
+                else {c: usable_hosts(cidr, c) for c in CLOUDS}
+            ),
             "tags": dict(self.nodes[cidr].tags),
         }
 
@@ -262,6 +270,9 @@ class CIDRModel:
 
 
 def tf_identifier(raw: str, fallback: str) -> str:
+    """A valid Terraform resource label: letters, digits, '_' and '-', not
+    starting with a digit. `fallback` is used as-is when `raw` sanitizes to
+    nothing, so it must already be valid."""
     s = re.sub(r"[^a-z0-9_]+", "_", raw.strip().lower())
     s = re.sub(r"_+", "_", s).strip("_")
     if not s:
@@ -271,19 +282,44 @@ def tf_identifier(raw: str, fallback: str) -> str:
     return s
 
 
+def cidr_label(prefix: str, cidr: str) -> str:
+    """Default resource label for an unnamed block, e.g. subnet_10_0_1_0_24.
+    Terraform labels must not start with a digit, so a prefix is required."""
+    return prefix + "_" + re.sub(r"[^0-9a-zA-Z]+", "_", cidr).strip("_").lower()
+
+
 def hcl_escape(value: str) -> str:
-    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+    """Escape a value for a double-quoted HCL string. Besides quotes and
+    backslashes this neutralizes template sequences, so a tag value of
+    '${var.x}' stays literal text instead of becoming an interpolation."""
+    s = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    s = s.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    return s.replace("${", "$${").replace("%{", "%%{")
 
 
 def hcl_tags_block(tags: dict[str, str], indent: str = "  ") -> list[str]:
+    """tags = { "key" = "value" }. Keys are always quoted: unquoted keys must
+    be HCL identifiers, so 'team name' or 'app:tier' broke the file."""
     if not tags:
         return []
-    width = max(len(k) for k in tags)
+    keys = {k: f'"{hcl_escape(k)}"' for k in tags}
+    width = max(len(q) for q in keys.values())
     lines = [f"{indent}tags = {{"]
     for k, v in tags.items():
-        lines.append(f'{indent}  {k.ljust(width)} = "{hcl_escape(v)}"')
+        lines.append(f'{indent}  {keys[k].ljust(width)} = "{hcl_escape(v)}"')
     lines.append(f"{indent}}}")
     return lines
+
+
+def _azure_name(s: str, fallback: str, max_len: int = 80) -> str:
+    """Sanitize to an Azure VNet/subnet name: letters, digits, '_', '.', '-';
+    must start with a letter or digit and end with a letter, digit or '_'.
+    Case is preserved, which matters for the reserved subnet names
+    (GatewaySubnet, AzureFirewallSubnet, AzureBastionSubnet, ...)."""
+    s = re.sub(r"[^A-Za-z0-9_.-]+", "-", s.strip())
+    s = re.sub(r"^[^A-Za-z0-9]+", "", s)[:max_len]
+    s = re.sub(r"[.-]+$", "", s)
+    return s or fallback
 
 
 def _gcp_name(s: str, fallback: str = "network") -> str:
@@ -368,6 +404,494 @@ def filename_safe(s: str) -> str:
     s = re.sub(r":+", "-", s)  # colons  → hyphens (IPv6)
     s = re.sub(r"-{2,}", "-", s)  # collapse consecutive hyphens
     return re.sub(r"[^A-Za-z0-9_\-]", "", s) or "plan"
+
+
+##=========================================================
+## CLOUD RULES
+##=========================================================
+##
+## Limits the providers enforce at create time. Checking them here means an
+## export either applies cleanly or refuses with the reason, instead of
+## producing Terraform that fails at `apply`.
+##
+## Sources (provider docs, current as of 2026):
+##   AWS:   VPC and subnet IPv4 sizes /16-/28, 5 reserved addresses per
+##          subnet; Amazon-provided IPv6 VPC blocks are /56, subnet IPv6
+##          sizes /44-/64 in steps of 4.
+##   Azure: smallest subnet /29, 5 reserved addresses per subnet;
+##          IPv6 subnets are /64 and need an IPv4 range alongside.
+##   GCP:   smallest subnet primary range /29, 4 reserved addresses;
+##          IPv6 ranges are assigned by Google, not chosen.
+
+CLOUDS = ("aws", "azure", "gcp")
+CLOUD_LABEL = {"aws": "AWS", "azure": "Azure", "gcp": "GCP"}
+CLOUD_RESERVED = {"aws": 5, "azure": 5, "gcp": 4}
+
+# Ranges no cloud will accept for a VPC/VNet/subnet.
+_FORBIDDEN_V4 = [
+    (ipaddress.ip_network("127.0.0.0/8"), "loopback"),
+    (ipaddress.ip_network("169.254.0.0/16"), "link-local"),
+    (ipaddress.ip_network("224.0.0.0/4"), "multicast"),
+    (ipaddress.ip_network("255.255.255.255/32"), "broadcast"),
+]
+_AZURE_FORBIDDEN_V4 = [
+    (ipaddress.ip_network("168.63.129.16/32"), "Azure platform (168.63.129.16)"),
+]
+_PRIVATE_V4 = [
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("100.64.0.0/10"),  # CGNAT, accepted by all three
+]
+_DOCKER_BRIDGE = ipaddress.ip_network("172.17.0.0/16")
+
+# Azure subnets with reserved names and the largest prefix length each allows.
+_AZURE_SPECIAL_SUBNETS = {
+    "azurebastionsubnet": ("AzureBastionSubnet", 26),
+    "azurefirewallsubnet": ("AzureFirewallSubnet", 26),
+    "azurefirewallmanagementsubnet": ("AzureFirewallManagementSubnet", 26),
+    "gatewaysubnet": ("GatewaySubnet", 29),
+    "routeserversubnet": ("RouteServerSubnet", 27),
+}
+
+
+def usable_hosts(cidr: str, cloud: str | None = None) -> int:
+    """Addresses you can assign to hosts. Without a cloud: IPv4 minus network
+    and broadcast (all for /31 and /32), IPv6 all. With a cloud: minus that
+    cloud's reserved addresses per subnet."""
+    net = ipaddress.ip_network(cidr, strict=False)
+    if cloud is None:
+        return CIDRModel._host_range(net)[2]
+    return max(net.num_addresses - CLOUD_RESERVED[cloud], 0)
+
+
+def block_issues(
+    cidr: str,
+    cloud: str,
+    role: str,
+    name: str | None = None,
+    check_public: bool = True,
+):
+    """Problems with one block for one cloud. role is 'vpc' or 'subnet'.
+    Returns (errors, warnings): errors mean the cloud will reject it.
+    check_public=False skips the not-private-space warning (plan_issues only
+    asks for it once, on the first block, since subnets inherit it)."""
+    net = ipaddress.ip_network(cidr, strict=False)
+    v6 = isinstance(net, ipaddress.IPv6Network)
+    p = net.prefixlen
+    errors: list[str] = []
+    warnings: list[str] = []
+    what = (
+        {"aws": "VPC", "azure": "VNet", "gcp": "network"}[cloud]
+        if role == "vpc"
+        else "subnet"
+    )
+    label = f"{CLOUD_LABEL[cloud]} {what} {cidr}"
+
+    if v6:
+        if cloud == "gcp":
+            errors.append(
+                f"{label}: GCP assigns IPv6 ranges itself (ULA or external); "
+                "they cannot be chosen. Plan the IPv4 ranges and enable "
+                "stack_type = IPV4_IPV6 on the subnets instead."
+            )
+        elif cloud == "azure":
+            errors.append(
+                f"{label}: Azure has no IPv6-only VNets or subnets; every subnet "
+                "also needs an IPv4 range. Plan the IPv4 space and add the IPv6 "
+                "prefixes to it."
+            )
+        elif role == "vpc" and p != 56:
+            errors.append(
+                f"{label}: Amazon-provided IPv6 blocks are /56, so the plan must "
+                "start from a /56 (only the offsets are used; AWS picks the "
+                "addresses). For other sizes use an IPv6 IPAM pool."
+            )
+        elif role == "subnet" and not (44 <= p <= 64 and p % 4 == 0):
+            errors.append(
+                f"{label}: AWS IPv6 subnets must be /44 to /64 in steps of 4 "
+                "(/56, /60 or /64 inside a /56 VPC)."
+            )
+        return errors, warnings
+
+    for forbidden, why in _FORBIDDEN_V4 + (
+        _AZURE_FORBIDDEN_V4 if cloud == "azure" else []
+    ):
+        if net.overlaps(forbidden):
+            errors.append(f"{label}: overlaps the {why} range {forbidden}.")
+
+    if cloud == "aws":
+        if p < 16:
+            errors.append(f"{label}: AWS allows /16 at most (this is /{p}).")
+        if p > 28:
+            errors.append(f"{label}: AWS allows /28 at least (this is /{p}).")
+        if net.overlaps(_DOCKER_BRIDGE):
+            warnings.append(
+                f"{label}: overlaps 172.17.0.0/16, the Docker bridge default; "
+                "some AWS services (SageMaker, Cloud9, ECS on EC2) conflict with it."
+            )
+    elif cloud == "azure":
+        if p > 29:
+            errors.append(f"{label}: Azure allows /29 at least (this is /{p}).")
+        if role == "subnet" and name:
+            special = _AZURE_SPECIAL_SUBNETS.get(name.lower())
+            if special and p > special[1]:
+                errors.append(
+                    f"{label}: {special[0]} must be /{special[1]} or larger "
+                    f"(this is /{p})."
+                )
+    elif cloud == "gcp" and role == "subnet":
+        if p > 29:
+            errors.append(f"{label}: GCP allows /29 at least (this is /{p}).")
+
+    if check_public and not any(net.subnet_of(r) for r in _PRIVATE_V4):
+        warnings.append(
+            f"{label}: not in RFC 1918 or 100.64.0.0/10 private space. Only use "
+            "public addresses you own (BYOIP), or instances will not reach "
+            "whoever really owns them."
+        )
+    return errors, warnings
+
+
+def plan_issues(model: CIDRModel, cloud: str):
+    """(errors, warnings) for exporting the whole plan to `cloud`: the root is
+    checked as the VPC/VNet (GCP networks have no range of their own) and
+    every leaf as a subnet. Repeated warnings are reported once."""
+    errors: list[str] = []
+    warnings: list[str] = []
+    checks = []
+    if cloud != "gcp" or _is_ipv6(model.root):
+        checks.append((model.root, "vpc"))
+    checks += [(c, "subnet") for c in model.leaf_cidrs() if c != model.root]
+    for index, (cidr, role) in enumerate(checks):
+        name, _ = CIDRModel.split_name_tag(model.get_tags(cidr))
+        e, w = block_issues(cidr, cloud, role, name, check_public=index == 0)
+        errors += e
+        warnings += [x for x in w if x not in warnings]
+    if _is_ipv6(model.root) and cloud != "aws":
+        errors = errors[:1]  # one explanation is enough
+    return errors, warnings
+
+
+class ExportBlocked(Exception):
+    """Raised by a render_* function when the cloud would reject the plan."""
+
+    def __init__(self, cloud: str, errors: list[str]):
+        super().__init__("; ".join(errors))
+        self.cloud = cloud
+        self.errors = errors
+
+
+def _issue_header(warnings: list[str]) -> list[str]:
+    if not warnings:
+        return []
+    lines = ["#", "# WARNINGS (the cloud will accept these, but check them):"]
+    for w in warnings:
+        lines.append(f"#   - {w}")
+    return lines
+
+
+def _tag_lookup(tags: dict[str, str], *keys: str) -> str | None:
+    for k, v in tags.items():
+        if k.lower() in keys and v.strip():
+            return v.strip()
+    return None
+
+
+def _tf_tags_for(model: CIDRModel, cidr: str) -> dict[str, str]:
+    name_tag, other = CIDRModel.split_name_tag(model.get_tags(cidr))
+    result: dict[str, str] = {}
+    if name_tag:
+        result["Name"] = name_tag
+    result.update(other)
+    return result
+
+
+def _res_label(namer: UniqueNamer, model: CIDRModel, cidr: str, fallback: str):
+    """(unique Terraform label, came-from-name-tag)."""
+    name_tag, _ = CIDRModel.split_name_tag(model.get_tags(cidr))
+    if name_tag:
+        return namer.claim(tf_identifier(name_tag, fallback)), True
+    return namer.claim(fallback), False
+
+
+def render_aws_tf(model: CIDRModel, plan_name: str) -> str:
+    """Terraform for an AWS VPC and its subnets.
+
+    Subnets are spread over var.availability_zones in address order; a subnet
+    tagged az=<zone> (or availability_zone=<zone>) is pinned to that zone.
+    For an IPv6 plan the VPC gets an Amazon-provided /56 and each subnet is
+    placed at the same offset inside it with cidrsubnet(), as IPv6-only.
+    """
+    errors, warnings = plan_issues(model, "aws")
+    if errors:
+        raise ExportBlocked("aws", errors)
+
+    namer = UniqueNamer()
+    is_v6 = _is_ipv6(model.root)
+    root_net = ipaddress.ip_network(model.root, strict=False)
+    vpc, vpc_named = _res_label(
+        namer, model, model.root, tf_identifier(plan_name, "main")
+    )
+    subnets = [c for c in model.leaf_cidrs() if c != model.root]
+    needs_az_var = any(
+        _tag_lookup(model.get_tags(c), "az", "availability_zone") is None
+        for c in subnets
+    )
+
+    lines = [
+        "# CIDRSculpter: Terraform / AWS",
+        f"# Plan:      {plan_name}",
+        f"# Root CIDR: {model.root}",
+    ]
+    if is_v6:
+        lines += [
+            "#",
+            "# IPv6: AWS assigns the VPC's /56, so the addresses below are placed",
+            "# by OFFSET inside it with cidrsubnet(); the plan's layout is kept",
+            "# but the actual prefixes are Amazon's. Subnets are IPv6-only.",
+            "# A VPC always needs an IPv4 block too (var.vpc_ipv4_cidr).",
+        ]
+    lines += _issue_header(warnings)
+    lines.append("")
+
+    if needs_az_var:
+        lines += [
+            'variable "availability_zones" {',
+            '  description = "AZs to spread subnets across in address order, '
+            'e.g. [\\"us-east-1a\\", \\"us-east-1b\\"]. '
+            'A subnet tagged az=<zone> uses that zone instead."',
+            "  type        = list(string)",
+            "}",
+            "",
+        ]
+    if is_v6:
+        lines += [
+            'variable "vpc_ipv4_cidr" {',
+            '  description = "IPv4 block AWS requires on every VPC; pick one '
+            'that does not overlap your other networks."',
+            "  type        = string",
+            '  default     = "10.0.0.0/16"',
+            "}",
+            "",
+        ]
+
+    lines.append(f'resource "aws_vpc" "{vpc}" {{')
+    if vpc_named:
+        lines.append("  # resource name from 'name' tag")
+    if is_v6:
+        lines += [
+            "  cidr_block                       = var.vpc_ipv4_cidr",
+            "  assign_generated_ipv6_cidr_block = true",
+        ]
+    else:
+        lines.append(f'  cidr_block = "{model.root}"')
+    lines += hcl_tags_block(_tf_tags_for(model, model.root))
+    lines.append("}")
+
+    az_index = 0
+    for c in subnets:
+        label, named = _res_label(namer, model, c, cidr_label("subnet", c))
+        az = _tag_lookup(model.get_tags(c), "az", "availability_zone")
+        if az:
+            az_expr = f'"{hcl_escape(az)}"'
+        else:
+            az_expr = f"element(var.availability_zones, {az_index})"
+            az_index += 1
+
+        lines += ["", f'resource "aws_subnet" "{label}" {{']
+        if named:
+            lines.append("  # resource name from 'name' tag")
+        if is_v6:
+            net = ipaddress.ip_network(c, strict=False)
+            newbits = net.prefixlen - root_net.prefixlen
+            netnum = (int(net.network_address) - int(root_net.network_address)) >> (
+                128 - net.prefixlen
+            )
+            lines += [
+                f"  # plan: {c}",
+                f"  vpc_id                                         = aws_vpc.{vpc}.id",
+                f"  ipv6_cidr_block                                = cidrsubnet(aws_vpc.{vpc}.ipv6_cidr_block, {newbits}, {netnum})",
+                "  ipv6_native                                    = true",
+                "  assign_ipv6_address_on_creation                = true",
+                "  enable_resource_name_dns_aaaa_record_on_launch = true",
+                '  private_dns_hostname_type_on_launch            = "resource-name"',
+                f"  availability_zone                              = {az_expr}",
+            ]
+        else:
+            lines += [
+                f"  vpc_id            = aws_vpc.{vpc}.id",
+                f'  cidr_block        = "{c}"',
+                f"  availability_zone = {az_expr}",
+            ]
+        lines += hcl_tags_block(_tf_tags_for(model, c))
+        lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def render_aws_plan(model: CIDRModel, plan_name: str) -> dict:
+    """The AWS JSON plan, with per-subnet usable counts and any issues."""
+    errors, warnings = plan_issues(model, "aws")
+    return {
+        "plan_name": plan_name,
+        "root_cidr": model.root,
+        "vpc": model.root,
+        "valid_for_aws": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "subnets": [
+            {
+                "cidr": c,
+                "usable_hosts": usable_hosts(c, "aws"),
+                "tags": model.get_tags(c),
+            }
+            for c in model.leaf_cidrs()
+            if c != model.root
+        ],
+    }
+
+
+def render_azure_tf(model: CIDRModel, plan_name: str) -> str:
+    """Terraform for an Azure VNet and its subnets (IPv4).
+
+    The Azure `name` keeps the name tag's case, so reserved subnet names such
+    as GatewaySubnet work; unnamed blocks get vnet-/snet- names that Azure
+    accepts. azurerm_subnet has no tags argument, so subnet tags become
+    comments.
+    """
+    errors, warnings = plan_issues(model, "azure")
+    if errors:
+        raise ExportBlocked("azure", errors)
+
+    namer = UniqueNamer()
+    vnet_tag, _ = CIDRModel.split_name_tag(model.get_tags(model.root))
+    vnet_res = namer.claim(tf_identifier(vnet_tag or plan_name, "main"))
+    vnet_name = _azure_name(
+        vnet_tag or plan_name, "vnet-" + cidr_label("", model.root)[1:], 64
+    )
+
+    lines = [
+        "# CIDRSculpter: Terraform / Azure",
+        f"# Plan:      {plan_name}",
+        f"# Root CIDR: {model.root}",
+    ]
+    lines += _issue_header(warnings)
+    lines += [
+        "",
+        'variable "location" {',
+        '  description = "Azure region"',
+        "  type        = string",
+        '  default     = "eastus"',
+        "}",
+        "",
+        'variable "resource_group_name" {',
+        '  description = "Name of an existing resource group"',
+        "  type        = string",
+        "}",
+        "",
+        f'resource "azurerm_virtual_network" "{vnet_res}" {{',
+        f'  name                = "{hcl_escape(vnet_name)}"',
+        f'  address_space       = ["{model.root}"]',
+        "  location            = var.location",
+        "  resource_group_name = var.resource_group_name",
+    ]
+    lines += hcl_tags_block(_tf_tags_for(model, model.root))
+    lines.append("}")
+
+    used_names: set[str] = set()
+    for c in model.leaf_cidrs():
+        if c == model.root:
+            continue
+        name_tag, _ = CIDRModel.split_name_tag(model.get_tags(c))
+        res = namer.claim(tf_identifier(name_tag or "", cidr_label("subnet", c)))
+        fallback = "snet-" + re.sub(r"[^0-9a-zA-Z]+", "-", c).strip("-")
+        special = _AZURE_SPECIAL_SUBNETS.get((name_tag or "").lower())
+        name = special[0] if special else _azure_name(name_tag or "", fallback)
+        base, i = name, 2
+        while name.lower() in used_names:
+            name = f"{base}-{i}"
+            i += 1
+        used_names.add(name.lower())
+
+        lines += [
+            "",
+            f'resource "azurerm_subnet" "{res}" {{',
+            f'  name                 = "{hcl_escape(name)}"',
+            "  resource_group_name  = var.resource_group_name",
+            f"  virtual_network_name = azurerm_virtual_network.{vnet_res}.name",
+            f'  address_prefixes     = ["{c}"]',
+        ]
+        all_tags = _tf_tags_for(model, c)
+        if all_tags:
+            lines.append("  # Tags (azurerm_subnet has no tags argument;")
+            lines.append("  #  set these on the VNet or resource group instead):")
+            for k, v in all_tags.items():
+                lines.append(f'  # {k} = "{hcl_escape(v)}"')
+        lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def render_gcp_tf(model: CIDRModel, plan_name: str) -> str:
+    """Terraform for a GCP VPC network and its subnetworks (IPv4).
+
+    Subnetworks go in var.region unless tagged region=<region>. Neither
+    resource takes labels, so tags become comments.
+    """
+    errors, warnings = plan_issues(model, "gcp")
+    if errors:
+        raise ExportBlocked("gcp", errors)
+
+    namer = UniqueNamer()
+    net_tag, _ = CIDRModel.split_name_tag(model.get_tags(model.root))
+    network_res = namer.claim(tf_identifier(net_tag or plan_name, "main"))
+
+    lines = [
+        "# CIDRSculpter: Terraform / GCP",
+        f"# Plan:      {plan_name}",
+        f"# Root CIDR: {model.root}",
+    ]
+    lines += _issue_header(warnings)
+    lines += [
+        "",
+        'variable "project_id" {',
+        '  description = "GCP project ID"',
+        "  type        = string",
+        "}",
+        "",
+        'variable "region" {',
+        '  description = "Default GCP region for subnetworks '
+        '(a subnet tagged region=<region> overrides it)"',
+        "  type        = string",
+        '  default     = "us-central1"',
+        "}",
+        "",
+        f'resource "google_compute_network" "{network_res}" {{',
+        f'  name                    = "{_gcp_name(network_res)}"',
+        "  project                 = var.project_id",
+        "  auto_create_subnetworks = false",
+    ]
+    lines += _tag_comment_block(_tf_tags_for(model, model.root))
+    lines.append("}")
+
+    for c in model.leaf_cidrs():
+        if c == model.root:
+            continue
+        name_tag, _ = CIDRModel.split_name_tag(model.get_tags(c))
+        res = namer.claim(tf_identifier(name_tag or "", cidr_label("subnet", c)))
+        region = _tag_lookup(model.get_tags(c), "region")
+        region_expr = f'"{hcl_escape(region)}"' if region else "var.region"
+        lines += [
+            "",
+            f'resource "google_compute_subnetwork" "{res}" {{',
+            f'  name          = "{_gcp_name(res)}"',
+            "  project       = var.project_id",
+            f"  region        = {region_expr}",
+            f'  ip_cidr_range = "{c}"',
+            f"  network       = google_compute_network.{network_res}.id",
+        ]
+        lines += _tag_comment_block(_tf_tags_for(model, c))
+        lines.append("}")
+    return "\n".join(lines) + "\n"
 
 
 ##=========================================================
@@ -479,7 +1003,16 @@ class TableScreen(Screen):
     def on_mount(self):
         model = self.app.model
         self.table.add_columns(
-            "CIDR", "START", "END", "HOSTS", "PARENT", "DEPTH", "LEAF", "NAME", "TAGS"
+            "CIDR",
+            "START",
+            "END",
+            "HOSTS",
+            "AWS/AZURE/GCP",
+            "PARENT",
+            "DEPTH",
+            "LEAF",
+            "NAME",
+            "TAGS",
         )
         for cidr in sorted(model.nodes, key=lambda c: ipaddress.ip_network(c)):
             i = model.info(cidr)
@@ -489,6 +1022,7 @@ class TableScreen(Screen):
                 i["start"],
                 i["end"],
                 str(i["hosts"]),
+                "/".join(str(i["usable"][c]) for c in CLOUDS) if i["usable"] else "-",
                 model.parent(cidr),
                 str(model.depth(cidr)),
                 "yes" if model.is_leaf(cidr) else "no",
@@ -685,6 +1219,14 @@ class CIDRSculpterApp(App):
             f"[b]Start:[/b] {i['start']}",
             f"[b]End:[/b] {i['end']}",
             f"[b]Hosts:[/b] {_fmt_hosts(i['hosts'])}",
+        ]
+        if i["usable"]:
+            lines.append(
+                "[b]Usable in cloud:[/b] "
+                + "  ".join(f"{CLOUD_LABEL[c]} {i['usable'][c]}" for c in CLOUDS)
+            )
+        lines += self._cloud_fit_lines(cidr, is_leaf)
+        lines += [
             f"[b]Parent:[/b] {model.parent(cidr)}",
             f"[b]Depth:[/b] {model.depth(cidr)}",
             f"[b]Leaf (usable):[/b] {'yes' if is_leaf else 'no'}",
@@ -697,6 +1239,33 @@ class CIDRSculpterApp(App):
             tags_block = "  [dim](none: press 'a' to add)[/dim]"
         lines.append(f"[b]Tags:[/b]\n{tags_block}")
         self.details_panel.update("\n".join(lines))
+
+    def _cloud_fit_lines(self, cidr: str, is_leaf: bool) -> list[str]:
+        """'Cloud fit: AWS ok  Azure ok  GCP x' plus the reasons, for the
+        blocks that get exported (the root as VPC/VNet, and leaf subnets)."""
+        model = self.model
+        is_root = cidr == model.root
+        if not (is_leaf or is_root):
+            return []
+        marks, reasons = [], []
+        for cloud in CLOUDS:
+            if is_root and not is_leaf and cloud == "gcp" and not _is_ipv6(cidr):
+                marks.append(f"{CLOUD_LABEL[cloud]} [dim]n/a[/dim]")
+                continue
+            role = "vpc" if is_root else "subnet"
+            name, _ = CIDRModel.split_name_tag(model.get_tags(cidr))
+            errors, _ = block_issues(cidr, cloud, role, name, check_public=False)
+            if errors:
+                marks.append(f"{CLOUD_LABEL[cloud]} [{CATPPUCCIN['red']}]x[/]")
+                reasons += [
+                    f"  [{CATPPUCCIN['red']}]{CLOUD_LABEL[cloud]}:[/] "
+                    + e.split(": ", 1)[-1]
+                    for e in errors[:1]
+                ]
+            else:
+                marks.append(f"{CLOUD_LABEL[cloud]} [{CATPPUCCIN['green']}]ok[/]")
+        what = "VPC/VNet" if is_root else "subnet"
+        return [f"[b]Cloud fit ({what}):[/b] " + "  ".join(marks)] + reasons
 
     ##=========================================================
     ## selection / navigation
@@ -799,21 +1368,34 @@ class CIDRSculpterApp(App):
             for c in self.model.nodes
         ]
 
-    def _tf_tags_for(self, cidr: str) -> dict[str, str]:
-        name_tag, other = CIDRModel.split_name_tag(self.model.get_tags(cidr))
-        result: dict[str, str] = {}
-        if name_tag:
-            result["Name"] = name_tag
-        result.update(other)
-        return result
-
-    def _res_name(
-        self, namer: UniqueNamer, cidr: str, fallback: str
-    ) -> tuple[str, bool]:
-        name_tag, _ = CIDRModel.split_name_tag(self.model.get_tags(cidr))
-        if name_tag:
-            return namer.claim(tf_identifier(name_tag, fallback)), True
-        return namer.claim(fallback), False
+    def _write_cloud_export(self, cloud: str, suffix: str, render) -> None:
+        """Render a cloud export and write it, or show why the cloud would
+        reject the plan. Nothing is written for a blocked plan, so a stale
+        file from an earlier export is never mistaken for this one."""
+        try:
+            text = render(self.model, self.plan_name)
+        except ExportBlocked as blocked:
+            items = "\n".join(
+                f"  [{CATPPUCCIN['red']}]x[/] {e}" for e in blocked.errors
+            )
+            self.details_panel.update(
+                f"[b][{CATPPUCCIN['red']}]Not exported: "
+                f"{CLOUD_LABEL[cloud]} would reject this plan[/][/b]\n{items}\n"
+                "[dim]Split or join blocks until these are gone, then export "
+                "again.[/dim]"
+            )
+            self.bell()
+            return
+        path = self.export_path(suffix)
+        with open(path, "w") as f:
+            f.write(text)
+        _, warnings = plan_issues(self.model, cloud)
+        msg = f"[green]Exported {CLOUD_LABEL[cloud]} Terraform → {path}[/green]"
+        if warnings:
+            msg += "\n" + "\n".join(
+                f"  [{CATPPUCCIN['yellow']}]![/] {w}" for w in warnings
+            )
+        self.details_panel.update(msg)
 
     ##=========================================================
     ## 1: JSON export
@@ -841,66 +1423,7 @@ class CIDRSculpterApp(App):
     def action_export_terraform(self):
         if not self.model:
             return
-        namer = UniqueNamer()
-        is_v6 = _is_ipv6(self.model.root)
-        vpc_name, vpc_named = self._res_name(
-            namer,
-            self.model.root,
-            tf_identifier(self.plan_name, "main"),
-        )
-
-        lines = [
-            "# CIDRSculpter: Terraform / AWS",
-            f"# Plan:      {self.plan_name}",
-            f"# Root CIDR: {self.model.root}",
-        ]
-        if is_v6:
-            lines += [
-                "#",
-                "# NOTE: AWS VPCs require an IPv4 cidr_block. For IPv6, configure",
-                "# assign_generated_ipv6_cidr_block = true (Amazon-assigned) or an",
-                "# IPv6 IPAM pool on the VPC, then use ipv6_cidr_block on subnets.",
-                "# Adjust the placeholder IPv4 CIDR below for your environment.",
-                "",
-                f'resource "aws_vpc" "{vpc_name}" {{',
-                '  cidr_block                       = "10.0.0.0/16"  # required IPv4 placeholder',
-                "  assign_generated_ipv6_cidr_block = true",
-            ]
-        else:
-            lines += [
-                "",
-                f'resource "aws_vpc" "{vpc_name}" {{',
-            ]
-            if vpc_named:
-                lines.append("  # resource name from 'name' tag")
-            lines.append(f'  cidr_block = "{self.model.root}"')
-        lines += hcl_tags_block(self._tf_tags_for(self.model.root))
-        lines.append("}")
-
-        for c in self.model.leaf_cidrs():
-            if c == self.model.root:
-                continue
-            fallback = re.sub(r"[./:]+", "_", c)
-            safe, was_named = self._res_name(namer, c, fallback)
-            lines += ["", f'resource "aws_subnet" "{safe}" {{']
-            if was_named:
-                lines.append("  # resource name from 'name' tag")
-            if is_v6:
-                lines += [
-                    f"  vpc_id          = aws_vpc.{vpc_name}.id",
-                    f'  ipv6_cidr_block = "{c}"',
-                ]
-            else:
-                lines += [
-                    f"  vpc_id     = aws_vpc.{vpc_name}.id",
-                    f'  cidr_block = "{c}"',
-                ]
-            lines += hcl_tags_block(self._tf_tags_for(c))
-            lines.append("}")
-
-        with open(self.export_path("terraform.tf"), "w") as f:
-            f.write("\n".join(lines))
-        self.details_panel.update("[green]Exported Terraform (AWS)[/green]")
+        self._write_cloud_export("aws", "terraform.tf", render_aws_tf)
 
     ##=========================================================
     ## 3: AWS JSON plan
@@ -909,22 +1432,17 @@ class CIDRSculpterApp(App):
     def action_export_aws(self):
         if not self.model:
             return
-        with open(self.export_path("aws_vpc_plan.json"), "w") as f:
-            json.dump(
-                {
-                    "plan_name": self.plan_name,
-                    "root_cidr": self.model.root,
-                    "vpc": self.model.root,
-                    "subnets": [
-                        {"cidr": c, "tags": self.model.get_tags(c)}
-                        for c in self.model.leaf_cidrs()
-                        if c != self.model.root
-                    ],
-                },
-                f,
-                indent=2,
+        plan = render_aws_plan(self.model, self.plan_name)
+        path = self.export_path("aws_vpc_plan.json")
+        with open(path, "w") as f:
+            json.dump(plan, f, indent=2)
+        if plan["errors"]:
+            self.details_panel.update(
+                f"[yellow]Exported AWS Plan → {path}, but AWS would reject it:"
+                "[/yellow]\n" + "\n".join(f"  x {e}" for e in plan["errors"])
             )
-        self.details_panel.update("[green]Exported AWS Plan[/green]")
+        else:
+            self.details_panel.update(f"[green]Exported AWS Plan → {path}[/green]")
 
     ##=========================================================
     ## 4: CSV
@@ -950,6 +1468,9 @@ class CIDRSculpterApp(App):
                     "LEAF",
                     "NAME",
                     "TAGS",
+                    "USABLE_AWS",
+                    "USABLE_AZURE",
+                    "USABLE_GCP",
                 ]
             )
             for row in self._export_base():
@@ -965,6 +1486,11 @@ class CIDRSculpterApp(App):
                         "yes" if row["is_leaf"] else "no",
                         name or "",
                         CIDRModel.tags_to_string(others),
+                        *(
+                            [row["usable"][c] for c in CLOUDS]
+                            if row["usable"]
+                            else ["", "", ""]
+                        ),
                     ]
                 )
         self.details_panel.update("[green]Exported CSV[/green]")
@@ -1389,145 +1915,20 @@ class CIDRSculpterApp(App):
             f.write("\n".join(lines) + "\n")
         self.details_panel.update("[green]Exported Confluence wiki markup[/green]")
 
-    ## azurerm_virtual_network  →  VPC equivalent
-    ## azurerm_subnet           →  subnet equivalent
-    ##
-    ## Note: azurerm_subnet does not support a 'tags' block, tags in
-    ## Azure are set at the Virtual Network and Resource Group level.
-    ## Subnet-level tags are emitted as comments for reference.
+    ##=========================================================
+    ## 9: Azure Terraform   (see render_azure_tf)
+    ## 0: GCP Terraform     (see render_gcp_tf)
+    ##=========================================================
 
     def action_export_azure(self):
         if not self.model:
             return
-        namer = UniqueNamer()
-        vnet_name_tag, _ = CIDRModel.split_name_tag(
-            self.model.get_tags(self.model.root)
-        )
-        vnet_res = namer.claim(tf_identifier(vnet_name_tag or self.plan_name, "main"))
-
-        lines = [
-            "# CIDRSculpter: Terraform / Azure",
-            f"# Plan:      {self.plan_name}",
-            f"# Root CIDR: {self.model.root}",
-            "",
-            'variable "location" {',
-            '  description = "Azure region"',
-            "  type        = string",
-            '  default     = "eastus"',
-            "}",
-            "",
-            'variable "resource_group_name" {',
-            '  description = "Name of an existing resource group"',
-            "  type        = string",
-            "}",
-            "",
-            f'resource "azurerm_virtual_network" "{vnet_res}" {{',
-            f'  name                = "{vnet_res}"',
-            f'  address_space       = ["{self.model.root}"]',
-            "  location            = var.location",
-            "  resource_group_name = var.resource_group_name",
-        ]
-        lines += hcl_tags_block(self._tf_tags_for(self.model.root))
-        lines.append("}")
-
-        for c in self.model.leaf_cidrs():
-            if c == self.model.root:
-                continue
-            name_tag, others = CIDRModel.split_name_tag(self.model.get_tags(c))
-            fallback = c.replace(".", "_").replace("/", "_")
-            res_name = namer.claim(tf_identifier(name_tag or fallback, fallback))
-
-            lines += [
-                "",
-                f'resource "azurerm_subnet" "{res_name}" {{',
-                f'  name                 = "{res_name}"',
-                "  resource_group_name  = var.resource_group_name",
-                f"  virtual_network_name = azurerm_virtual_network.{vnet_res}.name",
-                f'  address_prefixes     = ["{c}"]',
-            ]
-            all_tags = self._tf_tags_for(c)
-            if all_tags:
-                lines.append("  # Tags (azurerm_subnet has no tags block;")
-                lines.append("  #  set these on the VNet or Resource Group instead):")
-                for k, v in all_tags.items():
-                    lines.append(f'  # {k} = "{hcl_escape(v)}"')
-            lines.append("}")
-
-        with open(self.export_path("azure.tf"), "w") as f:
-            f.write("\n".join(lines) + "\n")
-        self.details_panel.update("[green]Exported Azure Terraform[/green]")
-
-    ##=========================================================
-    ## 0: GCP Terraform
-    ##=========================================================
-    ##
-    ## google_compute_network     →  VPC equivalent
-    ## google_compute_subnetwork  →  subnet equivalent (regional resource)
-    ##
-    ## Note: neither google_compute_network nor google_compute_subnetwork
-    ## supports a 'labels' or 'tags' block, so tags are emitted as reference
-    ## comments. Resource 'name' values must be RFC1035 (lowercase letters,
-    ## digits, hyphens; no underscores; max 63 chars) and are sanitized
-    ## separately from the Terraform resource labels.
+        self._write_cloud_export("azure", "azure.tf", render_azure_tf)
 
     def action_export_gcp(self):
         if not self.model:
             return
-        namer = UniqueNamer()
-        net_name_tag, _ = CIDRModel.split_name_tag(self.model.get_tags(self.model.root))
-        network_res = namer.claim(tf_identifier(net_name_tag or self.plan_name, "main"))
-
-        lines = [
-            "# CIDRSculpter: Terraform / GCP",
-            f"# Plan:      {self.plan_name}",
-            f"# Root CIDR: {self.model.root}",
-            "",
-            'variable "project_id" {',
-            '  description = "GCP project ID"',
-            "  type        = string",
-            "}",
-            "",
-            'variable "region" {',
-            '  description = "GCP region for subnetworks"',
-            "  type        = string",
-            '  default     = "us-central1"',
-            "}",
-            "",
-            f'resource "google_compute_network" "{network_res}" {{',
-            f'  name                    = "{_gcp_name(network_res)}"',
-            "  project                 = var.project_id",
-            "  auto_create_subnetworks = false",
-        ]
-        lines += _tag_comment_block(self._tf_tags_for(self.model.root))
-        lines.append("}")
-
-        for c in self.model.leaf_cidrs():
-            if c == self.model.root:
-                continue
-            name_tag, others = CIDRModel.split_name_tag(self.model.get_tags(c))
-            fallback = c.replace(".", "_").replace("/", "_")
-            res_name = namer.claim(tf_identifier(name_tag or fallback, fallback))
-
-            v6_note = (
-                ['  # GCP IPv6: add ipv6_access_type = "INTERNAL" or "EXTERNAL"']
-                if _is_ipv6(c)
-                else []
-            )
-            lines += [
-                "",
-                f'resource "google_compute_subnetwork" "{res_name}" {{',
-                f'  name          = "{_gcp_name(res_name)}"',
-                "  project       = var.project_id",
-                "  region        = var.region",
-                f'  ip_cidr_range = "{c}"',
-                f"  network       = google_compute_network.{network_res}.id",
-            ] + v6_note
-            lines += _tag_comment_block(self._tf_tags_for(c))
-            lines.append("}")
-
-        with open(self.export_path("gcp.tf"), "w") as f:
-            f.write("\n".join(lines) + "\n")
-        self.details_panel.update("[green]Exported GCP Terraform[/green]")
+        self._write_cloud_export("gcp", "gcp.tf", render_gcp_tf)
 
 
 ##=========================================================
