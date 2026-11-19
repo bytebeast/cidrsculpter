@@ -31,12 +31,14 @@ from __future__ import annotations
 
 import csv
 import html
+import io
 import ipaddress
 import json
 import re
 import uuid
 from dataclasses import dataclass, field
 
+from rich.markup import escape
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
@@ -211,18 +213,34 @@ class CIDRModel:
 
     @classmethod
     def from_dict(cls, data: dict) -> CIDRModel:
-        """Reconstruct a CIDRModel from a save-file dict."""
-        root = data["root_cidr"]
-        model = cls.__new__(cls)
-        model.root = root
-        model.nodes = {}
-        for cidr, nd in data["nodes"].items():
-            model.nodes[cidr] = Node(
-                cidr=cidr,
-                parent=nd.get("parent"),
-                children=list(nd.get("children", [])),
-                tags=dict(nd.get("tags", {})),
-            )
+        """Reconstruct a CIDRModel from a save-file dict by walking down from
+        the root. Every split must be its parent's two halves and parents are
+        derived rather than read, so a corrupt or hand-edited file raises
+        ValueError here instead of crashing or hanging the app later."""
+        root, nodes = data["root_cidr"], data["nodes"]
+        if not isinstance(root, str) or not isinstance(nodes, dict):
+            raise ValueError("root_cidr must be a string and nodes an object")
+        model = cls(str(ipaddress.ip_network(root, strict=False)))
+        pending = [model.root]
+        while pending:
+            cidr = pending.pop()
+            # Saves from before CIDR input was normalized key the root as
+            # typed (10.0.0.5/24, 2001:DB8::/32); children were always canonical.
+            nd = nodes.get(root if cidr == model.root else cidr)
+            if not isinstance(nd, dict):
+                raise ValueError(f"no node entry for {cidr}")
+            tags = dict(nd.get("tags") or {})
+            model.nodes[cidr].tags = {str(k): str(v) for k, v in tags.items()}
+            children = [str(c) for c in nd.get("children") or []]
+            if not children:
+                continue
+            net = ipaddress.ip_network(cidr)
+            halves = [str(n) for n in net.subnets(prefixlen_diff=1)]
+            if sorted(children) != sorted(halves):
+                raise ValueError(f"children of {cidr} must be its two halves")
+            for child in halves:
+                model.add(child, cidr)
+            pending += halves
         return model
 
     ##=========================================================
@@ -238,7 +256,9 @@ class CIDRModel:
     @staticmethod
     def parse_tag_string(raw: str) -> dict[str, str]:
         tags: dict[str, str] = {}
-        for chunk in raw.split(","):
+        # Split only on commas that start a new key=, so owners=a,b keeps
+        # its comma and round-trips through tags_to_string.
+        for chunk in re.split(r",(?=[^,=]*=)", raw):
             chunk = chunk.strip()
             if not chunk or "=" not in chunk:
                 continue
@@ -355,8 +375,20 @@ def _tag_comment_block(tags: dict[str, str], indent: str = "  ") -> list[str]:
         f"values shown for reference:"
     ]
     for k, v in tags.items():
-        lines.append(f'{indent}# {k} = "{hcl_escape(v)}"')
+        lines.append(f'{indent}# {hcl_escape(k)} = "{hcl_escape(v)}"')
     return lines
+
+
+def _unique_name(used: set[str], name: str, max_len: int) -> str:
+    """name, or name-2, name-3, ... trimmed so the suffix still fits within
+    the cloud's length limit. Compared case-insensitively, as Azure does."""
+    candidate, i = name, 2
+    while candidate.lower() in used:
+        suffix = f"-{i}"
+        candidate = name[: max_len - len(suffix)] + suffix
+        i += 1
+    used.add(candidate.lower())
+    return candidate
 
 
 class UniqueNamer:
@@ -559,13 +591,15 @@ def plan_issues(model: CIDRModel, cloud: str):
     every leaf as a subnet. Repeated warnings are reported once."""
     errors: list[str] = []
     warnings: list[str] = []
-    checks = []
-    if cloud != "gcp" or _is_ipv6(model.root):
-        checks.append((model.root, "vpc"))
+    checks = [(model.root, "vpc")]
     checks += [(c, "subnet") for c in model.leaf_cidrs() if c != model.root]
-    for index, (cidr, role) in enumerate(checks):
+    for cidr, role in checks:
         name, _ = CIDRModel.split_name_tag(model.get_tags(cidr))
-        e, w = block_issues(cidr, cloud, role, name, check_public=index == 0)
+        # Only the root is asked about private space: it covers every subnet,
+        # so its answer holds for all of them and is reported once.
+        e, w = block_issues(cidr, cloud, role, name, check_public=role == "vpc")
+        if role == "vpc" and cloud == "gcp" and not _is_ipv6(cidr):
+            e = []  # a GCP network has no range of its own to reject
         errors += e
         warnings += [x for x in w if x not in warnings]
     if _is_ipv6(model.root) and cloud != "aws":
@@ -603,7 +637,9 @@ def _tf_tags_for(model: CIDRModel, cidr: str) -> dict[str, str]:
     result: dict[str, str] = {}
     if name_tag:
         result["Name"] = name_tag
-    result.update(other)
+    # A second name/Name key would overwrite the one the resource label
+    # came from, so the first one wins here too.
+    result.update({k: v for k, v in other.items() if k.lower() != "name"})
     return result
 
 
@@ -641,7 +677,7 @@ def render_aws_tf(model: CIDRModel, plan_name: str) -> str:
 
     lines = [
         "# CIDRSculpter: Terraform / AWS",
-        f"# Plan:      {plan_name}",
+        f"# Plan:      {hcl_escape(plan_name)}",
         f"# Root CIDR: {model.root}",
     ]
     if is_v6:
@@ -772,7 +808,7 @@ def render_azure_tf(model: CIDRModel, plan_name: str) -> str:
 
     lines = [
         "# CIDRSculpter: Terraform / Azure",
-        f"# Plan:      {plan_name}",
+        f"# Plan:      {hcl_escape(plan_name)}",
         f"# Root CIDR: {model.root}",
     ]
     lines += _issue_header(warnings)
@@ -807,11 +843,7 @@ def render_azure_tf(model: CIDRModel, plan_name: str) -> str:
         fallback = "snet-" + re.sub(r"[^0-9a-zA-Z]+", "-", c).strip("-")
         special = _AZURE_SPECIAL_SUBNETS.get((name_tag or "").lower())
         name = special[0] if special else _azure_name(name_tag or "", fallback)
-        base, i = name, 2
-        while name.lower() in used_names:
-            name = f"{base}-{i}"
-            i += 1
-        used_names.add(name.lower())
+        name = _unique_name(used_names, name, 80)
 
         lines += [
             "",
@@ -826,7 +858,7 @@ def render_azure_tf(model: CIDRModel, plan_name: str) -> str:
             lines.append("  # Tags (azurerm_subnet has no tags argument;")
             lines.append("  #  set these on the VNet or resource group instead):")
             for k, v in all_tags.items():
-                lines.append(f'  # {k} = "{hcl_escape(v)}"')
+                lines.append(f'  # {hcl_escape(k)} = "{hcl_escape(v)}"')
         lines.append("}")
     return "\n".join(lines) + "\n"
 
@@ -847,7 +879,7 @@ def render_gcp_tf(model: CIDRModel, plan_name: str) -> str:
 
     lines = [
         "# CIDRSculpter: Terraform / GCP",
-        f"# Plan:      {plan_name}",
+        f"# Plan:      {hcl_escape(plan_name)}",
         f"# Root CIDR: {model.root}",
     ]
     lines += _issue_header(warnings)
@@ -873,17 +905,19 @@ def render_gcp_tf(model: CIDRModel, plan_name: str) -> str:
     lines += _tag_comment_block(_tf_tags_for(model, model.root))
     lines.append("}")
 
+    used_names: set[str] = set()
     for c in model.leaf_cidrs():
         if c == model.root:
             continue
         name_tag, _ = CIDRModel.split_name_tag(model.get_tags(c))
         res = namer.claim(tf_identifier(name_tag or "", cidr_label("subnet", c)))
+        name = _unique_name(used_names, _gcp_name(res), 63)
         region = _tag_lookup(model.get_tags(c), "region")
         region_expr = f'"{hcl_escape(region)}"' if region else "var.region"
         lines += [
             "",
             f'resource "google_compute_subnetwork" "{res}" {{',
-            f'  name          = "{_gcp_name(res)}"',
+            f'  name          = "{name}"',
             "  project       = var.project_id",
             f"  region        = {region_expr}",
             f'  ip_cidr_range = "{c}"',
@@ -945,10 +979,11 @@ class CIDRInput(Screen):
         self.input.focus()
 
     def on_input_submitted(self):
-        cidr = self.input.value.strip()
+        # Store the canonical network: 10.0.0.5/16 is accepted as typed but
+        # kept as 10.0.0.0/16, or every strict parse later raises.
         try:
-            ipaddress.ip_network(cidr, strict=False)
-        except Exception:
+            cidr = str(ipaddress.ip_network(self.input.value.strip(), strict=False))
+        except ValueError:
             self.app.bell()
             return
         self.app.start_model(cidr)
@@ -984,6 +1019,7 @@ class TagInput(Screen):
 
     def on_input_submitted(self):
         self.app.model.set_tags(self.cidr, CIDRModel.parse_tag_string(self.input.value))
+        self.app.dirty = True
         self.app.update_details(self.cidr)
         self.app.pop_screen()
 
@@ -1066,18 +1102,23 @@ class LoadScreen(Screen):
             self.app.bell()
             return
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 data = json.load(f)
             # basic validation
-            if "root_cidr" not in data or "nodes" not in data:
+            if not isinstance(data, dict) or not {"root_cidr", "nodes"} <= data.keys():
                 raise ValueError("missing required keys: root_cidr / nodes")
             self.app.load_plan(data)
-            self.app.pop_screen()
         except FileNotFoundError:
-            self.error_msg.update(f"[red]File not found: {path}[/red]")
+            self.error_msg.update(f"[red]File not found: {escape(path)}[/red]")
             self.app.bell()
-        except (json.JSONDecodeError, ValueError, KeyError) as exc:
-            self.error_msg.update(f"[red]Invalid plan file: {exc}[/red]")
+        except OSError as exc:
+            self.error_msg.update(
+                f"[red]Could not read {escape(path)}: {exc.strerror}[/red]"
+            )
+            self.app.bell()
+        except (ValueError, KeyError, TypeError) as exc:
+            # ValueError covers JSONDecodeError and UnicodeDecodeError too
+            self.error_msg.update(f"[red]Invalid plan file: {escape(str(exc))}[/red]")
             self.app.bell()
 
     def action_cancel(self):
@@ -1129,11 +1170,29 @@ class CIDRSculpterApp(App):
         ("c", "export_confluence", "Confluence"),
         ("q", "quit", "Quit"),
     ]
+    # App bindings fire on every screen, so without this 's' on the table
+    # view would split whatever is selected in the hidden tree.
+    _TREE_ACTIONS = {action for _, action, _ in BINDINGS} - {"quit"}
 
     def __init__(self):
         super().__init__()
         self.model: CIDRModel | None = None
         self.plan_name: str = "plan"
+        self.dirty = False
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
+        return action not in self._TREE_ACTIONS or len(self.screen_stack) == 1
+
+    async def action_quit(self):
+        if self.dirty:
+            # Cleared so a second q quits; any further edit re-arms the warning.
+            self.dirty = False
+            self.details_panel.update(
+                "[yellow]Unsaved changes: ctrl+s to save, or q again to quit[/yellow]"
+            )
+            self.bell()
+            return
+        self.exit()
 
     ##=========================================================
     ## compose / lifecycle
@@ -1156,10 +1215,25 @@ class CIDRSculpterApp(App):
 
     def start_model(self, cidr: str):
         self.model = CIDRModel(cidr)
+        self.dirty = False
         self.build_tree()
 
     def export_path(self, suffix: str) -> str:
         return f"{filename_safe(self.plan_name)}_{suffix}"
+
+    def _write(self, path: str, text: str, newline: str | None = None) -> bool:
+        """Write a file, or show why it could not be written. An unhandled
+        OSError here would end the session and lose the unsaved plan."""
+        try:
+            with open(path, "w", encoding="utf-8", newline=newline) as f:
+                f.write(text)
+        except OSError as exc:
+            self.details_panel.update(
+                f"[{CATPPUCCIN['red']}]Could not write {path}: {exc.strerror}[/]"
+            )
+            self.bell()
+            return False
+        return True
 
     ##=========================================================
     ## tree
@@ -1288,6 +1362,7 @@ class CIDRSculpterApp(App):
         if not node or not isinstance(node.data, str):
             return
         if self.model.split(node.data):
+            self.dirty = True
             self.build_tree(focus_cidr=node.data)
         else:
             self.bell()
@@ -1299,6 +1374,7 @@ class CIDRSculpterApp(App):
         if not node or not isinstance(node.data, str):
             return
         if self.model.join(node.data):
+            self.dirty = True
             self.build_tree(focus_cidr=node.data)
         else:
             self.bell()
@@ -1335,22 +1411,31 @@ class CIDRSculpterApp(App):
             )
             return
         path = self.export_path("plan.json")
-        with open(path, "w") as f:
-            json.dump(self.model.to_dict(self.plan_name), f, indent=2)
+        if not self._write(
+            path, json.dumps(self.model.to_dict(self.plan_name), indent=2)
+        ):
+            return
+        self.dirty = False
         self.details_panel.update(f"[green]Saved → {path}[/green]")
 
     def action_load(self):
         self.push_screen(LoadScreen())
 
     def load_plan(self, data: dict):
-        """Restore state from a save-file dict (called by LoadScreen)."""
-        self.plan_name = data.get("plan_name", "plan")
+        """Restore state from a save-file dict (called by LoadScreen). The
+        model is built first so a bad file leaves the current plan untouched."""
+        model = CIDRModel.from_dict(data)
+        self.plan_name = str(data.get("plan_name") or "plan")
         self.title = self.plan_name
-        self.model = CIDRModel.from_dict(data)
+        self.model = model
+        self.dirty = False
         self.sub_title = self.model.root
+        # Back to the tree whether this came from the start screen or the main one.
+        while len(self.screen_stack) > 1:
+            self.pop_screen()
         self.build_tree()
         self.details_panel.update(
-            f"[green]Loaded: {self.plan_name}  ({self.model.root})[/green]"
+            f"[green]Loaded: {escape(self.plan_name)}  ({self.model.root})[/green]"
         )
 
     ##=========================================================
@@ -1365,7 +1450,7 @@ class CIDRSculpterApp(App):
                 "depth": self.model.depth(c),
                 "is_leaf": self.model.is_leaf(c),
             }
-            for c in self.model.nodes
+            for c in sorted(self.model.nodes, key=lambda c: ipaddress.ip_network(c))
         ]
 
     def _write_cloud_export(self, cloud: str, suffix: str, render) -> None:
@@ -1387,8 +1472,8 @@ class CIDRSculpterApp(App):
             self.bell()
             return
         path = self.export_path(suffix)
-        with open(path, "w") as f:
-            f.write(text)
+        if not self._write(path, text):
+            return
         _, warnings = plan_issues(self.model, cloud)
         msg = f"[green]Exported {CLOUD_LABEL[cloud]} Terraform → {path}[/green]"
         if warnings:
@@ -1404,16 +1489,13 @@ class CIDRSculpterApp(App):
     def action_export_json(self):
         if not self.model:
             return
-        with open(self.export_path("cidr.json"), "w") as f:
-            json.dump(
-                {
-                    "plan_name": self.plan_name,
-                    "root_cidr": self.model.root,
-                    "subnets": self._export_base(),
-                },
-                f,
-                indent=2,
-            )
+        doc = {
+            "plan_name": self.plan_name,
+            "root_cidr": self.model.root,
+            "subnets": self._export_base(),
+        }
+        if not self._write(self.export_path("cidr.json"), json.dumps(doc, indent=2)):
+            return
         self.details_panel.update("[green]Exported JSON[/green]")
 
     ##=========================================================
@@ -1434,8 +1516,8 @@ class CIDRSculpterApp(App):
             return
         plan = render_aws_plan(self.model, self.plan_name)
         path = self.export_path("aws_vpc_plan.json")
-        with open(path, "w") as f:
-            json.dump(plan, f, indent=2)
+        if not self._write(path, json.dumps(plan, indent=2)):
+            return
         if plan["errors"]:
             self.details_panel.update(
                 f"[yellow]Exported AWS Plan → {path}, but AWS would reject it:"
@@ -1451,48 +1533,51 @@ class CIDRSculpterApp(App):
     def action_export_csv(self):
         if not self.model:
             return
-        with open(self.export_path("cidr.csv"), "w", newline="") as f:
-            w = csv.writer(f)
-            ## # comment lines carry metadata, most CSV parsers skip lines
-            ## starting with # or you can strip them: grep -v '^#'
-            w.writerow([f"# plan_name: {self.plan_name}"])
-            w.writerow([f"# root_cidr: {self.model.root}"])
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        ## # comment lines carry metadata, most CSV parsers skip lines
+        ## starting with # or you can strip them: grep -v '^#'
+        w.writerow([f"# plan_name: {self.plan_name}"])
+        w.writerow([f"# root_cidr: {self.model.root}"])
+        w.writerow(
+            [
+                "CIDR",
+                "START",
+                "END",
+                "HOSTS",
+                "PARENT",
+                "DEPTH",
+                "LEAF",
+                "NAME",
+                "TAGS",
+                "USABLE_AWS",
+                "USABLE_AZURE",
+                "USABLE_GCP",
+            ]
+        )
+        for row in self._export_base():
+            name, others = CIDRModel.split_name_tag(row["tags"])
             w.writerow(
                 [
-                    "CIDR",
-                    "START",
-                    "END",
-                    "HOSTS",
-                    "PARENT",
-                    "DEPTH",
-                    "LEAF",
-                    "NAME",
-                    "TAGS",
-                    "USABLE_AWS",
-                    "USABLE_AZURE",
-                    "USABLE_GCP",
+                    row["cidr"],
+                    row["start"],
+                    row["end"],
+                    row["hosts"],
+                    row["parent"],
+                    row["depth"],
+                    "yes" if row["is_leaf"] else "no",
+                    name or "",
+                    CIDRModel.tags_to_string(others),
+                    *(
+                        [row["usable"][c] for c in CLOUDS]
+                        if row["usable"]
+                        else ["", "", ""]
+                    ),
                 ]
             )
-            for row in self._export_base():
-                name, others = CIDRModel.split_name_tag(row["tags"])
-                w.writerow(
-                    [
-                        row["cidr"],
-                        row["start"],
-                        row["end"],
-                        row["hosts"],
-                        row["parent"],
-                        row["depth"],
-                        "yes" if row["is_leaf"] else "no",
-                        name or "",
-                        CIDRModel.tags_to_string(others),
-                        *(
-                            [row["usable"][c] for c in CLOUDS]
-                            if row["usable"]
-                            else ["", "", ""]
-                        ),
-                    ]
-                )
+        # newline="" keeps csv's own \r\n line endings untranslated
+        if not self._write(self.export_path("cidr.csv"), buf.getvalue(), newline=""):
+            return
         self.details_panel.update("[green]Exported CSV[/green]")
 
     ##=========================================================
@@ -1630,8 +1715,8 @@ class CIDRSculpterApp(App):
         lines += self._render_node(self.model.root, 0)
         lines += self._rank_edges(self.model.root)
         lines.append("}")
-        with open(self.export_path("cidr.dot"), "w") as f:
-            f.write("\n".join(lines))
+        if not self._write(self.export_path("cidr.dot"), "\n".join(lines)):
+            return
         self.details_panel.update("[green]Exported Graphviz[/green]")
 
     ##=========================================================
@@ -1674,8 +1759,8 @@ class CIDRSculpterApp(App):
                     self.model.parent(cidr),
                     str(self.model.depth(cidr)),
                     "yes" if self.model.is_leaf(cidr) else "no",
-                    name or "-",
-                    CIDRModel.tags_to_string(others) or "-",
+                    re.sub(r"\s+", "_", name or "-"),
+                    re.sub(r"\s+", "_", CIDRModel.tags_to_string(others) or "-"),
                 ]
             )
 
@@ -1694,8 +1779,8 @@ class CIDRSculpterApp(App):
             fmt(headers),
         ] + [fmt(r) for r in rows]
 
-        with open(self.export_path("subnets.txt"), "w") as f:
-            f.write("\n".join(lines) + "\n")
+        if not self._write(self.export_path("subnets.txt"), "\n".join(lines) + "\n"):
+            return
         self.details_panel.update("[green]Exported plain text[/green]")
 
     ##=========================================================
@@ -1703,7 +1788,7 @@ class CIDRSculpterApp(App):
     ##=========================================================
     ##
     ## Ready to paste directly into GitHub, GitLab, Notion, etc.
-    ## Only leaf CIDRs are in the table (containers are not deployable).
+    ## Every block is in the table; the Leaf column marks the deployable ones.
 
     def action_export_markdown(self):
         if not self.model:
@@ -1718,12 +1803,12 @@ class CIDRSculpterApp(App):
             rows.append(
                 [
                     f"`{i['cidr']}`",
-                    name or "-",
+                    (name or "-").replace("|", "\\|"),
                     i["start"],
                     i["end"],
                     _fmt_hosts(i["hosts"]),
                     "✓" if self.model.is_leaf(cidr) else "",
-                    CIDRModel.tags_to_string(others) or "-",
+                    (CIDRModel.tags_to_string(others) or "-").replace("|", "\\|"),
                 ]
             )
 
@@ -1750,8 +1835,8 @@ class CIDRSculpterApp(App):
             sep,
         ] + [md_row(r) for r in rows]
 
-        with open(self.export_path("subnets.md"), "w") as f:
-            f.write("\n".join(lines) + "\n")
+        if not self._write(self.export_path("subnets.md"), "\n".join(lines) + "\n"):
+            return
         self.details_panel.update("[green]Exported Markdown[/green]")
 
     ##=========================================================
@@ -1856,8 +1941,10 @@ class CIDRSculpterApp(App):
             ],
         }
 
-        with open(self.export_path("subnets.adf.json"), "w") as f:
-            json.dump(doc, f, indent=2)
+        if not self._write(
+            self.export_path("subnets.adf.json"), json.dumps(doc, indent=2)
+        ):
+            return
         self.details_panel.update("[green]Exported ADF (Confluence/Jira)[/green]")
 
     ##=========================================================
@@ -1901,18 +1988,19 @@ class CIDRSculpterApp(App):
                 wiki_row(
                     [
                         "{{" + i["cidr"] + "}}",
-                        name or "-",
+                        (name or "-").replace("|", "\\|"),
                         i["start"],
                         i["end"],
                         _fmt_hosts(i["hosts"]),
                         "(/)" if self.model.is_leaf(cidr) else "(x)",
-                        CIDRModel.tags_to_string(others) or "-",
+                        (CIDRModel.tags_to_string(others) or "-").replace("|", "\\|"),
                     ]
                 )
             )
 
-        with open(self.export_path("subnets.confluence"), "w") as f:
-            f.write("\n".join(lines) + "\n")
+        path = self.export_path("subnets.confluence")
+        if not self._write(path, "\n".join(lines) + "\n"):
+            return
         self.details_panel.update("[green]Exported Confluence wiki markup[/green]")
 
     ##=========================================================
@@ -1937,7 +2025,7 @@ class CIDRSculpterApp(App):
 
 
 def main():
-    """Entry point for the installed `cidrsculpt` console script."""
+    """Run the TUI."""
     CIDRSculpterApp().run()
 
 

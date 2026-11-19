@@ -21,8 +21,13 @@ exclude = [".git", "__pycache__", ".venv"]
 # E4/E7/E9 rather than the whole E group: keeps the real pycodestyle errors
 # but drops E501 line-length warnings, which are unfixable noise on comment
 # lines because the formatter does not rewrap comments.
-select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B"]
+select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B", "S"]
 ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# pytest asserts, and test_release.py runs git with fixed argument lists
+"tests/*" = ["S101", "S603", "S607"]
+".github/scripts/*" = ["S603"]  # fixed git argv, no user input
 
 [tool.ruff.format]
 quote-style = "double"

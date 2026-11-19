@@ -1,0 +1,43 @@
+# .github/workflows/tests.yml
+
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  pytest:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported (requires-python in pyproject.toml) and current.
+        # 3.9 is end-of-life and setup-python has no build of it for
+        # ubuntu-latest (26.04), so the floor runs on the older image.
+        include:
+          - python-version: "3.9"
+            os: ubuntu-24.04
+          - python-version: "3.13"
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # Unpinned on purpose: the script is installed with whatever rich and
+      # textual are current, so that is what the tests should run against.
+      - run: pip install pytest -r requirements.txt
+
+      - run: python -m pytest -q tests
