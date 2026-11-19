@@ -46,7 +46,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Header, Input, Static, Tree
 
 __author__ = "github.com/bytebeast"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 # =========================================================
 # CATPPUCCIN THEME
