@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.1.1 (2026-11-19)
+
+### Bug Fixes
+
+- **cidrsculpter**: harden input, plan loading and exports
+- **release**: bump from last tag, gate tags on CHANGELOG
+
+### Documentation
+
+- add CLAUDE.md, README says Python 3.9+
+
+<!-- also in this release: build, ci -->
+
 ## v1.1.0 (2026-10-10)
 
 ### Bug Fixes
