@@ -73,7 +73,7 @@ subnet information without losing context of the tree above.
 | `j` | Join selected block's two children back into one |
 | `a` | Add / edit tags on the selected CIDR             |
 | `t` | Open full table view of all CIDRs                |
-| `q` | Quit                                             |
+| `q` | Quit (asks once if there are unsaved changes)    |
 
 ### Save & Load
 
@@ -157,7 +157,7 @@ export, so an export either applies or tells you why it would not.
 | Subnet size                  | /16 to /28                | /29 or larger              | /29 or larger        |
 | Reserved addresses / subnet  | 5                         | 5                          | 4                    |
 | IPv6 subnet size             | /44 to /64, steps of 4    | not supported IPv6-only    | assigned by Google   |
-| Special subnet names         |                           | `AzureBastionSubnet` and `AzureFirewallSubnet` /26+, `GatewaySubnet` /29+ |  |
+| Special subnet names         |                           | `AzureBastionSubnet`, `AzureFirewallSubnet` and `AzureFirewallManagementSubnet` /26+, `RouteServerSubnet` /27+, `GatewaySubnet` /29+ |  |
 
 Loopback, link-local, multicast and broadcast ranges are refused everywhere (and
 168.63.129.16 on Azure). Public (non-RFC 1918) ranges and AWS overlaps with the
@@ -186,6 +186,9 @@ Press `a` on any CIDR to add tags as `key=value` pairs (comma-separated):
 name=bastion001,private=false,tier=bastions
 ```
 
+A comma inside a value is kept, so `owners=alice,bob` is one tag. Only a comma
+followed by `key=` starts a new one.
+
 The `name` tag is special: used as the Terraform resource identifier, shown
 distinctly in diagrams, and as the display name in tables and exports.
 
@@ -209,12 +212,16 @@ order, so pass the AZs you want (for example `["us-east-1a", "us-east-1b",
 ```
 # plan_name: Production VPC
 # root_cidr: 10.0.0.0/20
-CIDR          START       END          HOSTS  PARENT        DEPTH  IS_LEAF  NAME     OTHER_TAGS
-10.0.0.0/20   10.0.0.1    10.0.15.254  4094   ROOT          0      no       -        -
-10.0.0.0/22   10.0.0.1    10.0.3.254   1022   10.0.0.0/21   2      yes      private  tier=app
-10.0.4.0/22   10.0.4.1    10.0.7.254   1022   10.0.0.0/21   2      yes      public   tier=web
-10.0.8.0/21   10.0.8.1    10.0.15.254  2046   10.0.0.0/20   1      yes      data     tier=datastore
+CIDR        START    END         HOSTS PARENT      DEPTH IS_LEAF NAME    OTHER_TAGS
+10.0.0.0/20 10.0.0.1 10.0.15.254 4094  ROOT        0     no      -       -
+10.0.0.0/21 10.0.0.1 10.0.7.254  2046  10.0.0.0/20 1     no      -       -
+10.0.0.0/22 10.0.0.1 10.0.3.254  1022  10.0.0.0/21 2     yes     private tier=app
+10.0.4.0/22 10.0.4.1 10.0.7.254  1022  10.0.0.0/21 2     yes     public  tier=web
+10.0.8.0/21 10.0.8.1 10.0.15.254 2046  10.0.0.0/20 1     yes     data    tier=datastore
 ```
+
+Spaces inside names and tag values become `_`, so every row has the same
+number of columns for `awk` and `cut`.
 
 ```bash
 # print CIDR and name for all leaf subnets
@@ -226,10 +233,10 @@ awk 'NR>3 && $7=="yes" {print $1, $8}' Production_VPC_subnets.txt
 ```
 # plan_name: IPv6 Plan
 # root_cidr: 2001:db8::/32
-CIDR                  HOSTS  IS_LEAF  NAME
-2001:db8::/32         2^96   no       -
-2001:db8::/33         2^95   yes      -
-2001:db8:8000::/33    2^95   yes      -
+CIDR               START           END                                    HOSTS PARENT        DEPTH IS_LEAF NAME OTHER_TAGS
+2001:db8::/32      2001:db8::      2001:db8:ffff:ffff:ffff:ffff:ffff:ffff 2^96  ROOT          0     no      -    -
+2001:db8::/33      2001:db8::      2001:db8:7fff:ffff:ffff:ffff:ffff:ffff 2^95  2001:db8::/32 1     yes     -    -
+2001:db8:8000::/33 2001:db8:8000:: 2001:db8:ffff:ffff:ffff:ffff:ffff:ffff 2^95  2001:db8::/32 1     yes     -    -
 ```
 
 ### Terraform: AWS (IPv4)
@@ -333,9 +340,11 @@ h1. Production VPC
 *Root CIDR:* +10.0.0.0/20+
 
 ||CIDR||Name||Start||End||Hosts||Leaf||Tags||
-|{{monospace}}10.0.0.0/22{{/monospace}}|private|10.0.0.1|10.0.3.254|1022|(/)|tier=app|
-|{{monospace}}10.0.4.0/22{{/monospace}}|public|10.0.4.1|10.0.7.254|1022|(/)|tier=web|
-|{{monospace}}10.0.8.0/21{{/monospace}}|data|10.0.8.1|10.0.15.254|2046|(/)|tier=datastore|
+|{{10.0.0.0/20}}|-|10.0.0.1|10.0.15.254|4094|(x)|-|
+|{{10.0.0.0/21}}|-|10.0.0.1|10.0.7.254|2046|(x)|-|
+|{{10.0.0.0/22}}|private|10.0.0.1|10.0.3.254|1022|(/)|tier=app|
+|{{10.0.4.0/22}}|public|10.0.4.1|10.0.7.254|1022|(/)|tier=web|
+|{{10.0.8.0/21}}|data|10.0.8.1|10.0.15.254|2046|(/)|tier=datastore|
 ```
 
 Paste via **Edit → Insert → Markup → Confluence Wiki**.
@@ -393,8 +402,6 @@ Paste via **Edit → Insert → Markup → Confluence Wiki**.
   comments.
 - **GCP**: neither the network nor the subnetwork takes labels; tags are
   emitted as comments, and names are sanitised to RFC 1035.
-- **Exports are validated**: the generated Terraform for all three clouds is
-  checked with `tofu validate` against the current providers (see Tests).
 
 ---
 
