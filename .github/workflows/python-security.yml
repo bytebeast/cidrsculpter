@@ -2,14 +2,12 @@
 #
 # Security checks for the Python side. All open source:
 #
-#   ruff (S rules)  static analysis, a port of Bandit   (MIT)
 #   pip-audit       known CVEs in dependencies, by PyPA (Apache-2.0)
 #   gitleaks        committed secrets                   (MIT)
 #   zizmor          GitHub Actions workflow auditing    (MIT/Apache-2.0)
 #
-# Bandit itself is not run separately. Ruff's S ruleset is a port of it and
-# produced the same findings on this codebase, so running both only doubles
-# the noise.
+# Static analysis (ruff's S rules, a port of Bandit) is selected in
+# pyproject.toml and runs in ruff.yml, so it is not repeated here.
  
 name: python-security
  
@@ -27,26 +25,6 @@ permissions:
   contents: read
  
 jobs:
-  sast:
-    name: Static analysis (ruff S rules)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
- 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
- 
-      - run: pip install ruff
- 
-      # Reads select/ignore from pyproject.toml. Add "S" to the select list
-      # there rather than passing --select here, so a local `ruff check`
-      # gives you the same answer as CI.
-      - name: ruff check
-        run: ruff check --output-format github .
- 
   dependencies:
     name: Dependency CVEs (pip-audit)
     runs-on: ubuntu-latest
@@ -59,12 +37,7 @@ jobs:
         with:
           python-version: "3.12"
  
-      - run: pip install pip-audit
- 
-      # pycurl builds against libcurl, so the headers have to be present
-      # before pip-audit can resolve it.
-      - name: Install build headers for pycurl
-        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev
+      - run: pip install pip-audit==2.10.1
  
       - name: pip-audit
         run: pip-audit --requirement requirements.txt --strict --desc
@@ -97,7 +70,7 @@ jobs:
         with:
           python-version: "3.12"
  
-      - run: pip install zizmor
+      - run: pip install zizmor==1.32.0
  
       # Audits the workflow files themselves for script injection, excessive
       # permissions, credential persistence and unpinned actions. Worth having
