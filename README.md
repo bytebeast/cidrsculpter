@@ -4,7 +4,7 @@
   <img alt="Version" src="https://img.shields.io/badge/Version-1.0.1-89b4fa?style=flat">
   <img alt="Status" src="https://img.shields.io/badge/Status-beta-f9e2af?style=flat">
   <a href="https://github.com/bytebeast/cidrsculpter/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/badge/License-MIT-a6e3a1?style=flat"></a>
-  <a href="https://www.python.org/downloads/"><img alt="Python" src="https://img.shields.io/badge/Python-3.10+-cba6f7?style=flat"></a>
+  <a href="https://www.python.org/downloads/"><img alt="Python" src="https://img.shields.io/badge/Python-3.9+-cba6f7?style=flat"></a>
 </p>
 
 > An interactive terminal UI for planning and sculpting IP address spaces —
@@ -39,7 +39,7 @@ chmod +x cidrsculpter.py
 ./cidrsculpter.py
 ```
 
-Requires Python 3.10+. No external CIDR library, all address arithmetic uses
+Requires Python 3.9+. No external CIDR library, all address arithmetic uses
 Python's built-in `ipaddress` module.
 
 ---
