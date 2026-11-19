@@ -11,7 +11,7 @@
 
 - add CLAUDE.md, README says Python 3.9+
 
-<!-- also in this release: ci -->
+<!-- also in this release: build, ci -->
 
 ## v1.1.0 (2026-10-10)
 
